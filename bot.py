@@ -203,7 +203,8 @@ async def globaldm(interaction: discord.Interaction, bericht: str, afbeelding: d
     if not interaction.guild:
         return await interaction.response.send_message("❌ Dit commando kan alleen in een server gebruikt worden.", ephemeral=True)
 
-    await interaction.response.send_message("⏳ Global DM is gestart! Dit kan even duren...", ephemeral=True)
+    # Voorkom dat Discord een timeout geeft door direct te deferen (ephemeral)
+    await interaction.response.defer(ephemeral=True)
 
     succes = 0
     mislukt = 0
@@ -227,7 +228,7 @@ async def globaldm(interaction: discord.Interaction, bericht: str, afbeelding: d
         try:
             await member.send(embed=embed)
             succes += 1
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.3) # Sneller en stabieler binnen de tijdslimiet
         except (discord.Forbidden, discord.HTTPException):
             mislukt += 1
 
