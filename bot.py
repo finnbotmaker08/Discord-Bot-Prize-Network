@@ -9,7 +9,7 @@ import random
 
 print("Script wordt geladen...")
 
-# Probeer optioneel python-dotenv te laden (handig voor lokaal testen, op Railway pakt hij omgevingsvariabelen direct)
+# Probeer optioneel python-dotenv te laden (handig voor lokaal testen)
 try:
     from dotenv import load_dotenv
     env_path = pathlib.Path(__file__).parent / '.env'
@@ -31,19 +31,22 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # --- CONFIGURATIE: ROL ID'S ---
-ROLE_LOWER_STAFF = 1551318319892529192          # Mute, Warn[cite: 2, 8]
-ROLE_HIGHER_STAFF = 1551313880494374962         # Superrol (heeft overal toegang toe)[cite: 2, 8]
-ROLE_PARTNER_STAFF = 1551683186629812305        # Partnerad, Eisen[cite: 2, 8]
-ROLE_BOTBERICHT_DM_STAFF = 1558518307949256766  # Specifieke rol voor /botbericht, /dm en /globaldm[cite: 8]
+ROLE_LOWER_STAFF = 1551318319892529192          # Mute, Warn
+ROLE_HIGHER_STAFF = 1551313880494374962         # Superrol (heeft overal toegang toe)
+ROLE_PARTNER_STAFF = 1551683186629812305        # Partnerad, Eisen
+ROLE_BOTBERICHT_DM_STAFF = 1558518307949256766  # Specifieke rol voor /botbericht, /dm en /globaldm
 
-# Afbeeldingen URLs
-PRIZE_NETWORK_BANNER = "https://i.ibb.co/bc3100dd0fb5cc6d155b5c7907b0bae8/bc3100dd0fb5cc6d155b5c7907b0bae8.jpg"[cite: 2, 8]
+# Afbeelding URL
+PRIZE_NETWORK_BANNER = "https://i.ibb.co/bc3100dd0fb5cc6d155b5c7907b0bae8/bc3100dd0fb5cc6d155b5c7907b0bae8.jpg"
 
-# Controleer alleen nog op Discord Rollen (geen Developer User ID meer)
+# Controleer of de gebruiker de juiste rollen heeft
 def check_roles(interaction: discord.Interaction, allowed_role_ids: list[int]) -> bool:
+    if not interaction.guild:
+        return False
+        
     user_role_ids = [role.id for role in interaction.user.roles]
     
-    # Als de gebruiker de hogere staff rol heeft (Superrol), altijd toestemming geven
+    # Als de gebruiker de hogere staff rol heeft, altijd toestemming geven
     if ROLE_HIGHER_STAFF in user_role_ids:
         return True
         
@@ -55,9 +58,9 @@ async def on_ready():
     print(f'Bot is succesvol ingelogd als {bot.user}!')
     try:
         synced = await bot.tree.sync()
-        print(f"Gesynchroniseerd: {len(synced)} slash commands globaal.")[cite: 3, 8]
+        print(f"Gesynchroniseerd: {len(synced)} slash commands globaal.")
     except Exception as e:
-        print(f"Fout bij synchroniseren van commands: {e}")[cite: 8]
+        print(f"Fout bij synchroniseren van commands: {e}")
 
 
 # ==========================================
@@ -67,7 +70,7 @@ async def on_ready():
 @bot.tree.command(name="warn", description="Geef een officiële waarschuwing aan een lid.")
 async def warn(interaction: discord.Interaction, lid: discord.Member, reden: str):
     if not check_roles(interaction, [ROLE_LOWER_STAFF, ROLE_HIGHER_STAFF]):
-        return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)[cite: 8]
+        return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)
     
     embed = discord.Embed(
         title="⚠️ OFFICIËLE WAARSCHUWING",
@@ -75,11 +78,11 @@ async def warn(interaction: discord.Interaction, lid: discord.Member, reden: str
         color=discord.Color.from_rgb(255, 170, 0),
         timestamp=datetime.datetime.now(datetime.timezone.utc)
     )
-    embed.add_field(name="👤 Gebruiker", value=f"{lid.mention} (`{lid.id}`)", inline=True)[cite: 8]
-    embed.add_field(name="🛡️ Moderator", value=f"{interaction.user.mention}", inline=True)[cite: 8]
-    embed.add_field(name="📝 Reden", value=f"```\n{reden}\n```", inline=False)[cite: 8]
+    embed.add_field(name="👤 Gebruiker", value=f"{lid.mention} (`{lid.id}`)", inline=True)
+    embed.add_field(name="🛡️ Moderator", value=f"{interaction.user.mention}", inline=True)
+    embed.add_field(name="📝 Reden", value=f"```\n{reden}\n```", inline=False)
     embed.set_thumbnail(url=lid.display_avatar.url)
-    embed.set_footer(text="Prize Network Moderatie", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)[cite: 8]
+    embed.set_footer(text="Prize Network Moderatie", icon_url=interaction.guild.icon.url if interaction.guild and interaction.guild.icon else None)
     
     await interaction.response.send_message(embed=embed)
 
@@ -87,7 +90,7 @@ async def warn(interaction: discord.Interaction, lid: discord.Member, reden: str
 @bot.tree.command(name="mute", description="Tijdelijke mute (timeout) voor een lid.")
 async def mute(interaction: discord.Interaction, lid: discord.Member, minuten: int, reden: str):
     if not check_roles(interaction, [ROLE_LOWER_STAFF, ROLE_HIGHER_STAFF]):
-        return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)[cite: 8]
+        return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)
     
     duur = datetime.timedelta(minutes=minuten)
     await lid.timeout(duur, reason=reden)
@@ -98,12 +101,12 @@ async def mute(interaction: discord.Interaction, lid: discord.Member, minuten: i
         color=discord.Color.from_rgb(230, 126, 34),
         timestamp=datetime.datetime.now(datetime.timezone.utc)
     )
-    embed.add_field(name="👤 Gebruiker", value=f"{lid.mention} (`{lid.id}`)", inline=True)[cite: 8]
-    embed.add_field(name="⏱️ Duur", value=f"**{minuten} minuten**", inline=True)[cite: 8]
-    embed.add_field(name="🛡️ Moderator", value=f"{interaction.user.mention}", inline=True)[cite: 8]
-    embed.add_field(name="📝 Reden", value=f"```\n{reden}\n```", inline=False)[cite: 8]
+    embed.add_field(name="👤 Gebruiker", value=f"{lid.mention} (`{lid.id}`)", inline=True)
+    embed.add_field(name="⏱️ Duur", value=f"**{minuten} minuten**", inline=True)
+    embed.add_field(name="🛡️ Moderator", value=f"{interaction.user.mention}", inline=True)
+    embed.add_field(name="📝 Reden", value=f"```\n{reden}\n```", inline=False)
     embed.set_thumbnail(url=lid.display_avatar.url)
-    embed.set_footer(text="Prize Network Moderatie", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)[cite: 8]
+    embed.set_footer(text="Prize Network Moderatie", icon_url=interaction.guild.icon.url if interaction.guild and interaction.guild.icon else None)
     
     await interaction.response.send_message(embed=embed)
 
@@ -111,7 +114,7 @@ async def mute(interaction: discord.Interaction, lid: discord.Member, minuten: i
 @bot.tree.command(name="kick", description="Kick een lid uit de server.")
 async def kick(interaction: discord.Interaction, lid: discord.Member, reden: str = "Geen reden opgegeven"):
     if not check_roles(interaction, [ROLE_HIGHER_STAFF]):
-        return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)[cite: 8]
+        return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)
     
     await lid.kick(reason=reden)
     
@@ -121,10 +124,10 @@ async def kick(interaction: discord.Interaction, lid: discord.Member, reden: str
         color=discord.Color.from_rgb(231, 76, 60),
         timestamp=datetime.datetime.now(datetime.timezone.utc)
     )
-    embed.add_field(name="👤 Gebruiker", value=f"**{lid.display_name}** (`{lid.id}`)", inline=True)[cite: 8]
-    embed.add_field(name="🛡️ Moderator", value=f"{interaction.user.mention}", inline=True)[cite: 8]
-    embed.add_field(name="📝 Reden", value=f"```\n{reden}\n```", inline=False)[cite: 8]
-    embed.set_footer(text="Prize Network Moderatie", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)[cite: 8]
+    embed.add_field(name="👤 Gebruiker", value=f"**{lid.display_name}** (`{lid.id}`)", inline=True)
+    embed.add_field(name="🛡️ Moderator", value=f"{interaction.user.mention}", inline=True)
+    embed.add_field(name="📝 Reden", value=f"```\n{reden}\n```", inline=False)
+    embed.set_footer(text="Prize Network Moderatie", icon_url=interaction.guild.icon.url if interaction.guild and interaction.guild.icon else None)
 
     await interaction.response.send_message(embed=embed)
 
@@ -132,7 +135,7 @@ async def kick(interaction: discord.Interaction, lid: discord.Member, reden: str
 @bot.tree.command(name="ban", description="Ban een lid uit de server.")
 async def ban(interaction: discord.Interaction, lid: discord.Member, reden: str = "Geen reden opgegeven"):
     if not check_roles(interaction, [ROLE_HIGHER_STAFF]):
-        return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)[cite: 8]
+        return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)
     
     await lid.ban(reason=reden)
     
@@ -142,10 +145,10 @@ async def ban(interaction: discord.Interaction, lid: discord.Member, reden: str 
         color=discord.Color.from_rgb(155, 89, 182),
         timestamp=datetime.datetime.now(datetime.timezone.utc)
     )
-    embed.add_field(name="👤 Gebruiker", value=f"**{lid.display_name}** (`{lid.id}`)", inline=True)[cite: 8]
-    embed.add_field(name="🛡️ Moderator", value=f"{interaction.user.mention}", inline=True)[cite: 8]
-    embed.add_field(name="📝 Reden", value=f"```\n{reden}\n```", inline=False)[cite: 8]
-    embed.set_footer(text="Prize Network Moderatie", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)[cite: 8]
+    embed.add_field(name="👤 Gebruiker", value=f"**{lid.display_name}** (`{lid.id}`)", inline=True)
+    embed.add_field(name="🛡️ Moderator", value=f"{interaction.user.mention}", inline=True)
+    embed.add_field(name="📝 Reden", value=f"```\n{reden}\n```", inline=False)
+    embed.set_footer(text="Prize Network Moderatie", icon_url=interaction.guild.icon.url if interaction.guild and interaction.guild.icon else None)
 
     await interaction.response.send_message(embed=embed)
 
@@ -157,21 +160,22 @@ async def ban(interaction: discord.Interaction, lid: discord.Member, reden: str 
 @bot.tree.command(name="botbericht", description="Stuur een gewoon bericht namens de bot.")
 async def botbericht(interaction: discord.Interaction, bericht: str, afbeelding: discord.Attachment = None):
     if not check_roles(interaction, [ROLE_BOTBERICHT_DM_STAFF, ROLE_HIGHER_STAFF]):
-        return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)[cite: 8]
+        return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)
     
-    if afbeelding:
-        file = await afbeelding.to_file()
-        await interaction.channel.send(content=bericht, file=file)
-    else:
-        await interaction.channel.send(content=bericht)
-        
-    await interaction.response.send_message("✨ Bericht succesvol geplaatst!", ephemeral=True)[cite: 8]
+    if interaction.channel:
+        if afbeelding:
+            file = await afbeelding.to_file()
+            await interaction.channel.send(content=bericht, file=file)
+        else:
+            await interaction.channel.send(content=bericht)
+            
+    await interaction.response.send_message("✨ Bericht succesvol geplaatst!", ephemeral=True)
 
 
 @bot.tree.command(name="dm", description="Stuur een privébericht naar een gebruiker.")
 async def dm(interaction: discord.Interaction, gebruiker: discord.User, bericht: str, afbeelding: discord.Attachment = None):
     if not check_roles(interaction, [ROLE_BOTBERICHT_DM_STAFF, ROLE_HIGHER_STAFF]):
-        return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)[cite: 8]
+        return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)
     
     try:
         embed = discord.Embed(
@@ -183,20 +187,23 @@ async def dm(interaction: discord.Interaction, gebruiker: discord.User, bericht:
         if afbeelding:
             embed.set_image(url=afbeelding.url)
             
-        embed.set_footer(text="Verzonden door de staff van Prize Network", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)[cite: 8]
+        embed.set_footer(text="Verzonden door de staff van Prize Network", icon_url=interaction.guild.icon.url if interaction.guild and interaction.guild.icon else None)
 
         await gebruiker.send(embed=embed)
-        await interaction.response.send_message(f"✅ DM succesvol verzonden naar {gebruiker.mention}.", ephemeral=True)[cite: 8]
+        await interaction.response.send_message(f"✅ DM succesvol verzonden naar {gebruiker.mention}.", ephemeral=True)
     except discord.Forbidden:
-        await interaction.response.send_message("❌ Kon de DM niet versturen. De gebruiker heeft hun DM's waarschijnlijk uitstaan.", ephemeral=True)[cite: 8]
+        await interaction.response.send_message("❌ Kon de DM niet versturen. De gebruiker heeft hun DM's waarschijnlijk uitstaan.", ephemeral=True)
 
 
 @bot.tree.command(name="globaldm", description="Stuur een privébericht naar ALLE leden in de server.")
 async def globaldm(interaction: discord.Interaction, bericht: str, afbeelding: discord.Attachment = None):
     if not check_roles(interaction, [ROLE_BOTBERICHT_DM_STAFF, ROLE_HIGHER_STAFF]):
-        return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)[cite: 8]
+        return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)
 
-    await interaction.response.send_message("⏳ Global DM is gestart! Dit kan even duren...", ephemeral=True)[cite: 8]
+    if not interaction.guild:
+        return await interaction.response.send_message("❌ Dit commando kan alleen in een server gebruikt worden.", ephemeral=True)
+
+    await interaction.response.send_message("⏳ Global DM is gestart! Dit kan even duren...", ephemeral=True)
 
     succes = 0
     mislukt = 0
@@ -212,7 +219,7 @@ async def globaldm(interaction: discord.Interaction, bericht: str, afbeelding: d
     else:
         embed.set_image(url=PRIZE_NETWORK_BANNER)
         
-    embed.set_footer(text="Prize Network Community", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)[cite: 8]
+    embed.set_footer(text="Prize Network Community", icon_url=interaction.guild.icon.url if interaction.guild and interaction.guild.icon else None)
 
     for member in interaction.guild.members:
         if member.bot:
@@ -229,7 +236,7 @@ async def globaldm(interaction: discord.Interaction, bericht: str, afbeelding: d
         f"• 📤 Succesvol verzonden: **{succes}** leden\n"
         f"• ❌ Mislukt (DM uitstaan): **{mislukt}** leden",
         ephemeral=True
-    )[cite: 8]
+    )
 
 
 # ==========================================
@@ -246,21 +253,22 @@ class GiveawayView(discord.ui.View):
     async def join_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user in self.participants:
             self.participants.remove(interaction.user)
-            await interaction.response.send_message("❌ Je bent uit de giveaway gestapt.", ephemeral=True)[cite: 8]
+            await interaction.response.send_message("❌ Je bent uit de giveaway gestapt.", ephemeral=True)
         else:
             self.participants.append(interaction.user)
-            await interaction.response.send_message("🎉 Je doet nu succesvol mee aan de giveaway!", ephemeral=True)[cite: 8]
+            await interaction.response.send_message("🎉 Je doet nu succesvol mee aan de giveaway!", ephemeral=True)
 
         for index, field in enumerate(self.embed.fields):
             if "Deelnemers" in field.name:
-                self.embed.set_field_at(index, name="👥 Deelnemers", value=f"```\n{len(self.participants)} deelnemers\n```", inline=True)[cite: 8]
+                self.embed.set_field_at(index, name="👥 Deelnemers", value=f"```\n{len(self.participants)} deelnemers\n```", inline=True)
                 break
         
-        await interaction.message.edit(embed=self.embed)
+        if interaction.message:
+            await interaction.message.edit(embed=self.embed)
 
     @discord.ui.button(label="Aantal Deelnemers", style=discord.ButtonStyle.secondary, emoji="📊", custom_id="giveaway_count")
     async def count_participants(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(f"📊 Er doen op dit moment **{len(self.participants)}** mensen mee aan deze giveaway!", ephemeral=True)[cite: 8]
+        await interaction.response.send_message(f"📊 Er doen op dit moment **{len(self.participants)}** mensen mee aan deze giveaway!", ephemeral=True)
 
 
 @bot.tree.command(name="giveaway", description="Start een luxe giveaway.")
@@ -272,7 +280,10 @@ async def giveaway(
     tag_rol: discord.Role = None
 ):
     if not check_roles(interaction, [ROLE_HIGHER_STAFF]):
-        return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)[cite: 8]
+        return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)
+
+    if not interaction.channel:
+        return await interaction.response.send_message("❌ Dit commando werkt alleen in een kanaal.", ephemeral=True)
 
     eind_tijd = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=duur_minuten)
     timestamp = f"<t:{int(eind_tijd.timestamp())}:R>"
@@ -284,19 +295,19 @@ async def giveaway(
         color=discord.Color.from_rgb(88, 101, 242)
     )
     
-    embed.add_field(name="🏆 Prijs", value=f"```\n{prijs}\n```", inline=True)[cite: 8]
-    embed.add_field(name="👑 Winnaar(s)", value=f"```\n{aantal_winnaars} winnaar(s)\n```", inline=True)[cite: 8]
-    embed.add_field(name="👥 Deelnemers", value="```\n0 deelnemers\n```", inline=True)[cite: 8]
-    embed.add_field(name="⏳ Resterende Tijd", value=f"Eindigt {timestamp}\n({exacte_tijd})", inline=False)[cite: 8]
-    embed.add_field(name="🎙️ Gehost door", value=interaction.user.mention, inline=False)[cite: 8]
+    embed.add_field(name="🏆 Prijs", value=f"```\n{prijs}\n```", inline=True)
+    embed.add_field(name="👑 Winnaar(s)", value=f"```\n{aantal_winnaars} winnaar(s)\n```", inline=True)
+    embed.add_field(name="👥 Deelnemers", value="```\n0 deelnemers\n```", inline=True)
+    embed.add_field(name="⏳ Resterende Tijd", value=f"Eindigt {timestamp}\n({exacte_tijd})", inline=False)
+    embed.add_field(name="🎙️ Gehost door", value=interaction.user.mention, inline=False)
     
     embed.set_image(url=PRIZE_NETWORK_BANNER)
-    embed.set_footer(text="Prize Network • Veel succes!", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)[cite: 8]
+    embed.set_footer(text="Prize Network • Veel succes!", icon_url=interaction.guild.icon.url if interaction.guild and interaction.guild.icon else None)
 
     content = tag_rol.mention if tag_rol else None
     view = GiveawayView(embed=embed)
 
-    await interaction.response.send_message("✅ Giveaway succesvol gestart!", ephemeral=True)[cite: 8]
+    await interaction.response.send_message("✅ Giveaway succesvol gestart!", ephemeral=True)
     message = await interaction.channel.send(content=content, embed=embed, view=view)
 
     await asyncio.sleep(duur_minuten * 60)
@@ -321,14 +332,14 @@ async def giveaway(
             description=f"De giveaway voor **{prijs}** is officieel afgelopen!",
             color=discord.Color.from_rgb(255, 215, 0)
         )
-        eind_embed.add_field(name="🎁 Gewonnen Prijs", value=f"**{prijs}**", inline=False)[cite: 8]
-        eind_embed.add_field(name="🎉 Winnaar(s)", value=winnaars_mentions, inline=False)[cite: 8]
-        eind_embed.add_field(name="👥 Totaal Aantal Deelnemers", value=f"**{len(view.participants)}**", inline=False)[cite: 8]
+        eind_embed.add_field(name="🎁 Gewonnen Prijs", value=f"**{prijs}**", inline=False)
+        eind_embed.add_field(name="🎉 Winnaar(s)", value=winnaars_mentions, inline=False)
+        eind_embed.add_field(name="👥 Totaal Aantal Deelnemers", value=f"**{len(view.participants)}**", inline=False)
         eind_embed.set_image(url=PRIZE_NETWORK_BANNER)
-        eind_embed.set_footer(text="Prize Network • Open een ticket om je prijs te claimen!", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)[cite: 8]
+        eind_embed.set_footer(text="Prize Network • Open een ticket om je prijs te claimen!", icon_url=interaction.guild.icon.url if interaction.guild and interaction.guild.icon else None)
 
         await message.edit(embed=embed, view=view)
-        await interaction.channel.send(content=f"🎊 Gefeliciteerd {winnaars_mentions}! Je hebt **{prijs}** gewonnen!", embed=eind_embed)[cite: 8]
+        await interaction.channel.send(content=f"🎊 Gefeliciteerd {winnaars_mentions}! Je hebt **{prijs}** gewonnen!", embed=eind_embed)
 
 
 # ==========================================
@@ -338,7 +349,7 @@ async def giveaway(
 @bot.tree.command(name="partnerad", description="Plaats de officiële Prize Network partner advertentie.")
 async def partnerad(interaction: discord.Interaction):
     if not check_roles(interaction, [ROLE_PARTNER_STAFF, ROLE_HIGHER_STAFF]):
-        return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)[cite: 8]
+        return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)
 
     bericht_tekst = (
         "# PRIZE NETWORK\n\n"
@@ -357,7 +368,7 @@ async def partnerad(interaction: discord.Interaction):
 @bot.tree.command(name="eisen", description="Toon de officiële partner eisen.")
 async def eisen(interaction: discord.Interaction):
     if not check_roles(interaction, [ROLE_PARTNER_STAFF, ROLE_HIGHER_STAFF]):
-        return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)[cite: 8]
+        return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)
 
     embed = discord.Embed(
         title="🤝 **PARTNER EISEN — PRIZE NETWORK**",
@@ -378,7 +389,7 @@ async def eisen(interaction: discord.Interaction):
     )
     
     embed.set_image(url=PRIZE_NETWORK_BANNER)
-    embed.set_footer(text="Prize Network Partnerships", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)[cite: 8]
+    embed.set_footer(text="Prize Network Partnerships", icon_url=interaction.guild.icon.url if interaction.guild and interaction.guild.icon else None)
 
     await interaction.response.send_message(embed=embed)
 
