@@ -33,12 +33,13 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 ROLE_LOWER_STAFF = 1551318319892529192      # Mute, Warn
 ROLE_HIGHER_STAFF = 1551313880494374962     # Superrol (heeft overal toegang toe)
 ROLE_PARTNER_STAFF = 1551683186629812305    # Partnerad, Eisen
+ROLE_BOTBERICHT_DM_STAFF = 1558518307949256766  # Specifieke rol voor /botbericht, /dm en /globaldm
 DEVELOPER_ID = 1295590895474970705          # Jouw Discord User ID (heeft overal toegang toe)
 
 # Afbeeldingen URLs
 PRIZE_NETWORK_BANNER = "https://i.ibb.co/bc3100dd0fb5cc6d155b5c7907b0bae8/bc3100dd0fb5cc6d155b5c7907b0bae8.jpg"
 
-# Functie om te controleren of iemand de juiste rol heeft (of de developer/superrol is)
+# Algemene functie om te controleren of iemand de juiste rol heeft (of de developer/superrol is)
 def check_roles(interaction: discord.Interaction, allowed_role_ids: list[int]) -> bool:
     if interaction.user.id == DEVELOPER_ID:
         return True
@@ -153,12 +154,12 @@ async def ban(interaction: discord.Interaction, lid: discord.Member, reden: str 
 
 
 # ==========================================
-# 2. BOTBERICHT & DM COMMANDS
+# 2. BOTBERICHT, DM & GLOBALDM COMMANDS
 # ==========================================
 
 @bot.tree.command(name="botbericht", description="Stuur een gewoon bericht namens de bot.")
 async def botbericht(interaction: discord.Interaction, bericht: str, afbeelding: discord.Attachment = None):
-    if not check_roles(interaction, [ROLE_HIGHER_STAFF]):
+    if not check_roles(interaction, [ROLE_BOTBERICHT_DM_STAFF, ROLE_HIGHER_STAFF]):
         return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)
     
     if afbeelding:
@@ -172,7 +173,7 @@ async def botbericht(interaction: discord.Interaction, bericht: str, afbeelding:
 
 @bot.tree.command(name="dm", description="Stuur een privébericht naar een gebruiker.")
 async def dm(interaction: discord.Interaction, gebruiker: discord.User, bericht: str, afbeelding: discord.Attachment = None):
-    if not check_roles(interaction, [ROLE_HIGHER_STAFF]):
+    if not check_roles(interaction, [ROLE_BOTBERICHT_DM_STAFF, ROLE_HIGHER_STAFF]):
         return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)
     
     try:
@@ -191,6 +192,48 @@ async def dm(interaction: discord.Interaction, gebruiker: discord.User, bericht:
         await interaction.response.send_message(f"✅ DM succesvol verzonden naar {gebruiker.mention}.", ephemeral=True)
     except discord.Forbidden:
         await interaction.response.send_message("❌ Kon de DM niet versturen. De gebruiker heeft hun DM's waarschijnlijk uitstaan.", ephemeral=True)
+
+
+@bot.tree.command(name="globaldm", description="Stuur een privébericht naar ALLE leden in de server.")
+async def globaldm(interaction: discord.Interaction, bericht: str, afbeelding: discord.Attachment = None):
+    if not check_roles(interaction, [ROLE_BOTBERICHT_DM_STAFF, ROLE_HIGHER_STAFF]):
+        return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)
+
+    await interaction.response.send_message("⏳ Global DM is gestart! Dit kan even duren...", ephemeral=True)
+
+    succes = 0
+    mislukt = 0
+    
+    embed = discord.Embed(
+        title="📢 **MEDEDELING VAN PRIZE NETWORK**",
+        description=bericht,
+        color=discord.Color.from_rgb(52, 152, 219),
+        timestamp=datetime.datetime.now(datetime.timezone.utc)
+    )
+    if afbeelding:
+        embed.set_image(url=afbeelding.url)
+    else:
+        embed.set_image(url=PRIZE_NETWORK_BANNER)
+        
+    embed.set_footer(text="Prize Network Community", icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
+
+    # Lus door alle serverleden (behalve bots)
+    for member in interaction.guild.members:
+        if member.bot:
+            continue
+        try:
+            await member.send(embed=embed)
+            succes += 1
+            await asyncio.sleep(1) # Voorkomt Discord rate limits
+        except (discord.Forbidden, discord.HTTPException):
+            mislukt += 1
+
+    await interaction.followup.send(
+        f"✅ **Global DM Afgerond!**\n\n"
+        f"• 📤 Succesvol verzonden: **{succes}** leden\n"
+        f"• ❌ Mislukt (DM uitstaan): **{mislukt}** leden",
+        ephemeral=True
+    )
 
 
 # ==========================================
