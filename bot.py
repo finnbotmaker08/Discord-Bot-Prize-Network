@@ -30,11 +30,13 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# --- CONFIGURATIE: ROL ID'S ---
+# --- CONFIGURATIE: ROL & KANAAL ID'S ---
 ROLE_LOWER_STAFF = 1551318319892529192          # Mute, Warn
 ROLE_HIGHER_STAFF = 1551313880494374962         # Superrol (heeft overal toegang toe)
 ROLE_PARTNER_STAFF = 1551683186629812305        # Partnerad, Eisen
 ROLE_BOTBERICHT_DM_STAFF = 1558518307949256766  # Specifieke rol voor /botbericht, /dm en /globaldm
+
+LOG_CHANNEL_ID = 1553859972100788228            # Kanaal ID voor Giveaway Logs
 
 # Afbeelding URL
 PRIZE_NETWORK_BANNER = "https://i.ibb.co/bc3100dd0fb5cc6d155b5c7907b0bae8/bc3100dd0fb5cc6d155b5c7907b0bae8.jpg"
@@ -203,12 +205,8 @@ async def globaldm(interaction: discord.Interaction, bericht: str, afbeelding: d
     if not interaction.guild:
         return await interaction.response.send_message("❌ Dit commando kan alleen in een server gebruikt worden.", ephemeral=True)
 
-    # Voorkom dat Discord een timeout geeft door direct te deferen (ephemeral)
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.send_message("🚀 **Global DM is op de achtergrond gestart!** Je krijgt een seintje zodra het klaar is.", ephemeral=True)
 
-    succes = 0
-    mislukt = 0
-    
     embed = discord.Embed(
         title="📢 **MEDEDELING VAN PRIZE NETWORK**",
         description=bericht,
@@ -222,26 +220,32 @@ async def globaldm(interaction: discord.Interaction, bericht: str, afbeelding: d
         
     embed.set_footer(text="Prize Network Community", icon_url=interaction.guild.icon.url if interaction.guild and interaction.guild.icon else None)
 
-    for member in interaction.guild.members:
-        if member.bot:
-            continue
-        try:
-            await member.send(embed=embed)
-            succes += 1
-            await asyncio.sleep(0.3) # Sneller en stabieler binnen de tijdslimiet
-        except (discord.Forbidden, discord.HTTPException):
-            mislukt += 1
+    async def verstuur_achtergrond():
+        succes = 0
+        mislukt = 0
+        
+        for member in interaction.guild.members:
+            if member.bot:
+                continue
+            try:
+                await member.send(embed=embed)
+                succes += 1
+                await asyncio.sleep(0.1)
+            except (discord.Forbidden, discord.HTTPException):
+                mislukt += 1
 
-    await interaction.followup.send(
-        f"✅ **Global DM Afgerond!**\n\n"
-        f"• 📤 Succesvol verzonden: **{succes}** leden\n"
-        f"• ❌ Mislukt (DM uitstaan): **{mislukt}** leden",
-        ephemeral=True
-    )
+        if interaction.channel:
+            await interaction.channel.send(
+                f"✅ **Global DM Voltooid door {interaction.user.mention}!**\n"
+                f"• 📤 Succesvol: **{succes}** leden\n"
+                f"• ❌ Mislukt (DM's uit): **{mislukt}** leden"
+            )
+
+    asyncio.create_task(verstuur_achtergrond())
 
 
 # ==========================================
-# 3. LUXE GIVEAWAY SYSTEM
+# 3. LUXE GIVEAWAY SYSTEM + LOGGING
 # ==========================================
 
 class GiveawayView(discord.ui.View):
@@ -311,6 +315,24 @@ async def giveaway(
     await interaction.response.send_message("✅ Giveaway succesvol gestart!", ephemeral=True)
     message = await interaction.channel.send(content=content, embed=embed, view=view)
 
+    # --- LOG: GIVEAWAY GESTART ---
+    log_kanaal = bot.get_channel(LOG_CHANNEL_ID)
+    if log_kanaal:
+        start_log_embed = discord.Embed(
+            title="📋 **LOG: GIVEAWAY GESTART**",
+            color=discord.Color.from_rgb(52, 152, 219),
+            timestamp=datetime.datetime.now(datetime.timezone.utc)
+        )
+        start_log_embed.add_field(name="🏆 Prijs", value=f"**{prijs}**", inline=True)
+        start_log_embed.add_field(name="👑 Winnaar(s)", value=f"**{aantal_winnaars}**", inline=True)
+        start_log_embed.add_field(name="⏱️ Duur", value=f"**{duur_minuten} minuten**", inline=True)
+        start_log_embed.add_field(name="🎙️ Host", value=interaction.user.mention, inline=True)
+        start_log_embed.add_field(name="📍 Kanaal", value=interaction.channel.mention, inline=True)
+        start_log_embed.add_field(name="🔗 Bericht Link", value=f"[Ga naar Giveaway]({message.jump_url})", inline=False)
+        start_log_embed.set_footer(text="Prize Network Giveaway Logs")
+        await log_kanaal.send(embed=start_log_embed)
+
+    # Wacht tot de duur van de giveaway is afgelopen
     await asyncio.sleep(duur_minuten * 60)
 
     for child in view.children:
@@ -324,6 +346,18 @@ async def giveaway(
         )
         eind_embed.set_image(url=PRIZE_NETWORK_BANNER)
         await message.edit(embed=eind_embed, view=view)
+
+        # Log zonder winnaars
+        if log_kanaal:
+            eind_log_embed = discord.Embed(
+                title="📋 **LOG: GIVEAWAY AFGELOPEN (GEEN DEELNEMERS)**",
+                color=discord.Color.from_rgb(231, 76, 60),
+                timestamp=datetime.datetime.now(datetime.timezone.utc)
+            )
+            eind_log_embed.add_field(name="🏆 Prijs", value=f"**{prijs}**", inline=True)
+            eind_log_embed.add_field(name="👥 Deelnemers", value="**0**", inline=True)
+            eind_log_embed.add_field(name="🔗 Bericht Link", value=f"[Ga naar Giveaway]({message.jump_url})", inline=False)
+            await log_kanaal.send(embed=eind_log_embed)
     else:
         winnaars = random.sample(view.participants, min(len(view.participants), aantal_winnaars))
         winnaars_mentions = ", ".join([w.mention for w in winnaars])
@@ -341,6 +375,21 @@ async def giveaway(
 
         await message.edit(embed=embed, view=view)
         await interaction.channel.send(content=f"🎊 Gefeliciteerd {winnaars_mentions}! Je hebt **{prijs}** gewonnen!", embed=eind_embed)
+
+        # --- LOG: GIVEAWAY AFGELOPEN MET WINNAARS ---
+        if log_kanaal:
+            eind_log_embed = discord.Embed(
+                title="📋 **LOG: GIVEAWAY AFGELOPEN**",
+                color=discord.Color.from_rgb(46, 204, 113),
+                timestamp=datetime.datetime.now(datetime.timezone.utc)
+            )
+            eind_log_embed.add_field(name="🏆 Prijs", value=f"**{prijs}**", inline=True)
+            eind_log_embed.add_field(name="🎉 Winnaar(s)", value=winnaars_mentions, inline=True)
+            eind_log_embed.add_field(name="👥 Deelnemers", value=f"**{len(view.participants)}**", inline=True)
+            eind_log_embed.add_field(name="🎙️ Host", value=interaction.user.mention, inline=True)
+            eind_log_embed.add_field(name="🔗 Bericht Link", value=f"[Ga naar Giveaway]({message.jump_url})", inline=False)
+            eind_log_embed.set_footer(text="Prize Network Giveaway Logs")
+            await log_kanaal.send(embed=eind_log_embed)
 
 
 # ==========================================
