@@ -1,11 +1,12 @@
 import os
 import pathlib
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 import datetime
 import asyncio
 import random
+import feedparser
 
 print("Script wordt geladen...")
 
@@ -37,6 +38,16 @@ ROLE_PARTNER_STAFF = 1551683186629812305        # Partnerad, Eisen
 ROLE_BOTBERICHT_DM_STAFF = 1558518307949256766  # Specifieke rol voor /botbericht, /dm en /globaldm
 
 LOG_CHANNEL_ID = 1553859972100788228            # Kanaal ID voor Giveaway Logs
+TIKTOK_CHANNEL_ID = 1559164859290226788         # Kanaal ID voor TikTok Updates
+
+# TikTok Gegevens
+TIKTOK_USERNAME = "prizenetwork_official"
+TIKTOK_URL = f"https://www.tiktok.com/@{TIKTOK_USERNAME}"
+# RSSHUB / RSS Feed URL voor TikTok updates
+TIKTOK_RSS_URL = f"https://rsshub.app/tiktok/user/@{TIKTOK_USERNAME}"
+
+# Unieke ID's bijhouden van gestuurde berichten om dubbele meldingen te voorkomen
+laatst_geziene_tiktok_id = None
 
 # Afbeelding URL
 PRIZE_NETWORK_BANNER = "https://i.ibb.co/bc3100dd0fb5cc6d155b5c7907b0bae8/bc3100dd0fb5cc6d155b5c7907b0bae8.jpg"
@@ -55,9 +66,61 @@ def check_roles(interaction: discord.Interaction, allowed_role_ids: list[int]) -
     return any(role_id in user_role_ids for role_id in allowed_role_ids)
 
 
+# ==========================================
+# AUTOMATISCHE TIKTOK UPDATES (ELKE 5 MINUTEN)
+# ==========================================
+
+@tasks.loop(minutes=5)
+async def tiktok_checker():
+    global laatst_geziene_tiktok_id
+    try:
+        kanaal = bot.get_channel(TIKTOK_CHANNEL_ID)
+        if not kanaal:
+            return
+
+        feed = feedparser.parse(TIKTOK_RSS_URL)
+        if feed.entries:
+            meest_recente = feed.entries[0]
+            bericht_id = meest_recente.id if hasattr(meest_recente, 'id') else meest_recente.link
+
+            # Zorg dat de eerste keer opstarten niet oude berichten direct spamt
+            if laatst_geziene_tiktok_id is None:
+                laatst_geziene_tiktok_id = bericht_id
+                return
+
+            if bericht_id != laatst_geziene_tiktok_id:
+                laatst_geziene_tiktok_id = bericht_id
+                
+                titel = meest_recente.title if hasattr(meest_recente, 'title') else "Nieuwe update!"
+                link = meest_recente.link
+
+                embed = discord.Embed(
+                    title="🎵 **NIEUWE TIKTOK UPDATE!**",
+                    description=f"**{titel}**\n\nBekijk de video/live via onderstaande link:\n{link}",
+                    color=discord.Color.from_rgb(254, 44, 85),
+                    timestamp=datetime.datetime.now(datetime.timezone.utc)
+                )
+                embed.set_author(name="Prize Network TikTok", icon_url="https://pngimg.com/uploads/tiktok/tiktok_PNG13.png", url=TIKTOK_URL)
+                embed.set_image(url=PRIZE_NETWORK_BANNER)
+                embed.set_footer(text="Prize Network Socials")
+
+                # ZONDER PING VERSTUREN
+                await kanaal.send(
+                    embed=embed,
+                    allowed_mentions=discord.AllowedMentions.none()
+                )
+    except Exception as e:
+        print(f"Fout bij het ophalen van TikTok updates: {e}")
+
+
 @bot.event
 async def on_ready():
     print(f'Bot is succesvol ingelogd als {bot.user}!')
+    
+    # Start de TikTok achtergrondtaak als deze nog niet draait
+    if not tiktok_checker.is_running():
+        tiktok_checker.start()
+        
     try:
         synced = await bot.tree.sync()
         print(f"Gesynchroniseerd: {len(synced)} slash commands globaal.")
@@ -269,7 +332,10 @@ class GiveawayView(discord.ui.View):
                 break
         
         if interaction.message:
-            await interaction.message.edit(embed=self.embed)
+            try:
+                await interaction.message.edit(embed=self.embed)
+            except discord.HTTPException:
+                pass
 
     @discord.ui.button(label="Aantal Deelnemers", style=discord.ButtonStyle.secondary, emoji="📊", custom_id="giveaway_count")
     async def count_participants(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -332,7 +398,6 @@ async def giveaway(
         start_log_embed.set_footer(text="Prize Network Giveaway Logs")
         await log_kanaal.send(embed=start_log_embed)
 
-    # Wacht tot de duur van de giveaway is afgelopen
     await asyncio.sleep(duur_minuten * 60)
 
     for child in view.children:
@@ -347,7 +412,6 @@ async def giveaway(
         eind_embed.set_image(url=PRIZE_NETWORK_BANNER)
         await message.edit(embed=eind_embed, view=view)
 
-        # Log zonder winnaars
         if log_kanaal:
             eind_log_embed = discord.Embed(
                 title="📋 **LOG: GIVEAWAY AFGELOPEN (GEEN DEELNEMERS)**",
@@ -376,7 +440,6 @@ async def giveaway(
         await message.edit(embed=embed, view=view)
         await interaction.channel.send(content=f"🎊 Gefeliciteerd {winnaars_mentions}! Je hebt **{prijs}** gewonnen!", embed=eind_embed)
 
-        # --- LOG: GIVEAWAY AFGELOPEN MET WINNAARS ---
         if log_kanaal:
             eind_log_embed = discord.Embed(
                 title="📋 **LOG: GIVEAWAY AFGELOPEN**",
