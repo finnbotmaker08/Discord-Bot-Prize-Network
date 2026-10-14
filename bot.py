@@ -43,14 +43,14 @@ TIKTOK_CHANNEL_ID = 1559164859290226788         # Kanaal ID voor TikTok Updates
 # TikTok Gegevens
 TIKTOK_USERNAME = "prizenetwork_official"
 TIKTOK_URL = f"https://www.tiktok.com/@{TIKTOK_USERNAME}"
-# RSSHUB / RSS Feed URL voor TikTok updates
 TIKTOK_RSS_URL = f"https://rsshub.app/tiktok/user/@{TIKTOK_USERNAME}"
 
-# Unieke ID's bijhouden van gestuurde berichten om dubbele meldingen te voorkomen
 laatst_geziene_tiktok_id = None
-
-# Afbeelding URL
 PRIZE_NETWORK_BANNER = "https://i.ibb.co/bc3100dd0fb5cc6d155b5c7907b0bae8/bc3100dd0fb5cc6d155b5c7907b0bae8.jpg"
+
+# Sla actieve giveaways op voor /reroll
+actieve_giveaways = {}
+giveaway_counter = 0
 
 # Controleer of de gebruiker de juiste rollen heeft
 def check_roles(interaction: discord.Interaction, allowed_role_ids: list[int]) -> bool:
@@ -58,8 +58,6 @@ def check_roles(interaction: discord.Interaction, allowed_role_ids: list[int]) -
         return False
         
     user_role_ids = [role.id for role in interaction.user.roles]
-    
-    # Als de gebruiker de hogere staff rol heeft, altijd toestemming geven
     if ROLE_HIGHER_STAFF in user_role_ids:
         return True
         
@@ -67,7 +65,7 @@ def check_roles(interaction: discord.Interaction, allowed_role_ids: list[int]) -
 
 
 # ==========================================
-# AUTOMATISCHE TIKTOK UPDATES (ELKE 5 MINUTEN)
+# AUTOMATISCHE TIKTOK UPDATES
 # ==========================================
 
 @tasks.loop(minutes=5)
@@ -83,7 +81,6 @@ async def tiktok_checker():
             meest_recente = feed.entries[0]
             bericht_id = meest_recente.id if hasattr(meest_recente, 'id') else meest_recente.link
 
-            # Zorg dat de eerste keer opstarten niet oude berichten direct spamt
             if laatst_geziene_tiktok_id is None:
                 laatst_geziene_tiktok_id = bericht_id
                 return
@@ -104,7 +101,6 @@ async def tiktok_checker():
                 embed.set_image(url=PRIZE_NETWORK_BANNER)
                 embed.set_footer(text="Prize Network Socials")
 
-                # ZONDER PING VERSTUREN
                 await kanaal.send(
                     embed=embed,
                     allowed_mentions=discord.AllowedMentions.none()
@@ -116,11 +112,8 @@ async def tiktok_checker():
 @bot.event
 async def on_ready():
     print(f'Bot is succesvol ingelogd als {bot.user}!')
-    
-    # Start de TikTok achtergrondtaak als deze nog niet draait
     if not tiktok_checker.is_running():
         tiktok_checker.start()
-        
     try:
         synced = await bot.tree.sync()
         print(f"Gesynchroniseerd: {len(synced)} slash commands globaal.")
@@ -308,13 +301,13 @@ async def globaldm(interaction: discord.Interaction, bericht: str, afbeelding: d
 
 
 # ==========================================
-# 3. LUXE GIVEAWAY SYSTEM + LOGGING
+# 3. LUXE GIVEAWAY SYSTEM + LOGGING & REROLL
 # ==========================================
 
 class GiveawayView(discord.ui.View):
-    def __init__(self, embed: discord.Embed):
+    def __init__(self, embed: discord.Embed, participants_list: list):
         super().__init__(timeout=None)
-        self.participants = []
+        self.participants = participants_list
         self.embed = embed
 
     @discord.ui.button(label="Meedoen", style=discord.ButtonStyle.success, emoji="🎉", custom_id="giveaway_join")
@@ -350,11 +343,15 @@ async def giveaway(
     duur_minuten: int, 
     tag_rol: discord.Role = None
 ):
+    global giveaway_counter
     if not check_roles(interaction, [ROLE_HIGHER_STAFF]):
         return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)
 
     if not interaction.channel:
         return await interaction.response.send_message("❌ Dit commando werkt alleen in een kanaal.", ephemeral=True)
+
+    giveaway_counter += 1
+    giv_id = giveaway_counter
 
     eind_tijd = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=duur_minuten)
     timestamp = f"<t:{int(eind_tijd.timestamp())}:R>"
@@ -366,6 +363,9 @@ async def giveaway(
         color=discord.Color.from_rgb(88, 101, 242)
     )
     
+    # Heel klein rechtsboven / als auteur tonen: Giveaway nummer
+    embed.set_author(name=f"Giveaway #{giv_id}")
+
     embed.add_field(name="🏆 Prijs", value=f"```\n{prijs}\n```", inline=True)
     embed.add_field(name="👑 Winnaar(s)", value=f"```\n{aantal_winnaars} winnaar(s)\n```", inline=True)
     embed.add_field(name="👥 Deelnemers", value="```\n0 deelnemers\n```", inline=True)
@@ -373,19 +373,27 @@ async def giveaway(
     embed.add_field(name="🎙️ Gehost door", value=interaction.user.mention, inline=False)
     
     embed.set_image(url=PRIZE_NETWORK_BANNER)
-    embed.set_footer(text="Prize Network • Veel succes!", icon_url=interaction.guild.icon.url if interaction.guild and interaction.guild.icon else None)
+    embed.set_footer(text=f"Prize Network • ID: {giv_id} • Veel succes!", icon_url=interaction.guild.icon.url if interaction.guild and interaction.guild.icon else None)
 
     content = tag_rol.mention if tag_rol else None
-    view = GiveawayView(embed=embed)
+    
+    # Maak deelnemerslijst en sla op in dictionary voor rerolls
+    participants_list = []
+    actieve_giveaways[giv_id] = {
+        "prijs": prijs,
+        "participants": participants_list
+    }
 
-    await interaction.response.send_message("✅ Giveaway succesvol gestart!", ephemeral=True)
+    view = GiveawayView(embed=embed, participants_list=participants_list)
+
+    await interaction.response.send_message(f"✅ Giveaway **#{giv_id}** succesvol gestart!", ephemeral=True)
     message = await interaction.channel.send(content=content, embed=embed, view=view)
 
     # --- LOG: GIVEAWAY GESTART ---
     log_kanaal = bot.get_channel(LOG_CHANNEL_ID)
     if log_kanaal:
         start_log_embed = discord.Embed(
-            title="📋 **LOG: GIVEAWAY GESTART**",
+            title=f"📋 **LOG: GIVEAWAY #{giv_id} GESTART**",
             color=discord.Color.from_rgb(52, 152, 219),
             timestamp=datetime.datetime.now(datetime.timezone.utc)
         )
@@ -395,7 +403,7 @@ async def giveaway(
         start_log_embed.add_field(name="🎙️ Host", value=interaction.user.mention, inline=True)
         start_log_embed.add_field(name="📍 Kanaal", value=interaction.channel.mention, inline=True)
         start_log_embed.add_field(name="🔗 Bericht Link", value=f"[Ga naar Giveaway]({message.jump_url})", inline=False)
-        start_log_embed.set_footer(text="Prize Network Giveaway Logs")
+        start_log_embed.set_footer(text=f"Prize Network Giveaway Logs • ID: {giv_id}")
         await log_kanaal.send(embed=start_log_embed)
 
     await asyncio.sleep(duur_minuten * 60)
@@ -403,56 +411,96 @@ async def giveaway(
     for child in view.children:
         child.disabled = True
 
-    if not view.participants:
+    if not participants_list:
         eind_embed = discord.Embed(
-            title="🛑 **GIVEAWAY AFGELOPEN**",
+            title=f"🛑 **GIVEAWAY #{giv_id} AFGELOPEN**",
             description=f"De giveaway voor **{prijs}** is afgelopen, maar er waren helaas geen deelnemers!",
             color=discord.Color.from_rgb(231, 76, 60)
         )
+        eind_embed.set_author(name=f"Giveaway #{giv_id}")
         eind_embed.set_image(url=PRIZE_NETWORK_BANNER)
-        await message.edit(embed=eind_embed, view=view)
+        try:
+            await message.edit(embed=eind_embed, view=view)
+        except discord.HTTPException:
+            pass
 
         if log_kanaal:
             eind_log_embed = discord.Embed(
-                title="📋 **LOG: GIVEAWAY AFGELOPEN (GEEN DEELNEMERS)**",
+                title=f"📋 **LOG: GIVEAWAY #{giv_id} AFGELOPEN (GEEN DEELNEMERS)**",
                 color=discord.Color.from_rgb(231, 76, 60),
                 timestamp=datetime.datetime.now(datetime.timezone.utc)
             )
             eind_log_embed.add_field(name="🏆 Prijs", value=f"**{prijs}**", inline=True)
-            eind_log_embed.add_field(name="👥 Deelnemers", value="**0**", inline=True)
             eind_log_embed.add_field(name="🔗 Bericht Link", value=f"[Ga naar Giveaway]({message.jump_url})", inline=False)
             await log_kanaal.send(embed=eind_log_embed)
     else:
-        winnaars = random.sample(view.participants, min(len(view.participants), aantal_winnaars))
+        winnaars = random.sample(participants_list, min(len(participants_list), aantal_winnaars))
         winnaars_mentions = ", ".join([w.mention for w in winnaars])
         
         eind_embed = discord.Embed(
-            title="✨ **GIVEAWAY WINNAAR(S)** ✨",
+            title=f"✨ **GIVEAWAY WINNAAR(S) (#{giv_id})** ✨",
             description=f"De giveaway voor **{prijs}** is officieel afgelopen!",
             color=discord.Color.from_rgb(255, 215, 0)
         )
+        eind_embed.set_author(name=f"Giveaway #{giv_id}")
         eind_embed.add_field(name="🎁 Gewonnen Prijs", value=f"**{prijs}**", inline=False)
         eind_embed.add_field(name="🎉 Winnaar(s)", value=winnaars_mentions, inline=False)
-        eind_embed.add_field(name="👥 Totaal Aantal Deelnemers", value=f"**{len(view.participants)}**", inline=False)
+        eind_embed.add_field(name="👥 Totaal Aantal Deelnemers", value=f"**{len(participants_list)}**", inline=False)
         eind_embed.set_image(url=PRIZE_NETWORK_BANNER)
         eind_embed.set_footer(text="Prize Network • Open een ticket om je prijs te claimen!", icon_url=interaction.guild.icon.url if interaction.guild and interaction.guild.icon else None)
 
-        await message.edit(embed=embed, view=view)
-        await interaction.channel.send(content=f"🎊 Gefeliciteerd {winnaars_mentions}! Je hebt **{prijs}** gewonnen!", embed=eind_embed)
+        try:
+            await message.edit(embed=eind_embed, view=view)
+        except discord.HTTPException:
+            pass
+            
+        await interaction.channel.send(content=f"🎊 Gefeliciteerd {winnaars_mentions}! Je hebt **{prijs}** gewonnen (Giveaway **#{giv_id}**).", embed=eind_embed)
 
         if log_kanaal:
             eind_log_embed = discord.Embed(
-                title="📋 **LOG: GIVEAWAY AFGELOPEN**",
+                title=f"📋 **LOG: GIVEAWAY #{giv_id} AFGELOPEN**",
                 color=discord.Color.from_rgb(46, 204, 113),
                 timestamp=datetime.datetime.now(datetime.timezone.utc)
             )
             eind_log_embed.add_field(name="🏆 Prijs", value=f"**{prijs}**", inline=True)
             eind_log_embed.add_field(name="🎉 Winnaar(s)", value=winnaars_mentions, inline=True)
-            eind_log_embed.add_field(name="👥 Deelnemers", value=f"**{len(view.participants)}**", inline=True)
+            eind_log_embed.add_field(name="👥 Deelnemers", value=f"**{len(participants_list)}**", inline=True)
             eind_log_embed.add_field(name="🎙️ Host", value=interaction.user.mention, inline=True)
             eind_log_embed.add_field(name="🔗 Bericht Link", value=f"[Ga naar Giveaway]({message.jump_url})", inline=False)
-            eind_log_embed.set_footer(text="Prize Network Giveaway Logs")
+            eind_log_embed.set_footer(text=f"Prize Network Giveaway Logs • ID: {giv_id}")
             await log_kanaal.send(embed=eind_log_embed)
+
+
+@bot.tree.command(name="reroll", description="Kies nieuwe winnaars voor een giveaway.")
+@app_commands.describe(nummer="Het giveaway nummer", hoeveel="Aantal nieuwe winnaars")
+async def reroll(interaction: discord.Interaction, nummer: int, hoeveel: int):
+    if not check_roles(interaction, [ROLE_HIGHER_STAFF]):
+        return await interaction.response.send_message("❌ Je hebt geen rechten voor dit commando.", ephemeral=True)
+
+    if nummer not in actieve_giveaways:
+        return await interaction.response.send_message(f"❌ Kan geen actieve of opgeslagen giveaway vinden met nummer **{nummer}**.", ephemeral=True)
+
+    giv_data = actieve_giveaways[nummer]
+    participants = giv_data["participants"]
+    prijs = giv_data["prijs"]
+
+    if not participants:
+        return await interaction.response.send_message(f"❌ Er waren geen deelnemers bij giveaway **{nummer}** om te rerollen.", ephemeral=True)
+
+    nieuwe_winnaars = random.sample(participants, min(len(participants), hoeveel))
+    winnaars_mentions = ", ".join([w.mention for w in nieuwe_winnaars])
+
+    embed = discord.Embed(
+        title=f"🔄 **REROLL WINNAAR(S) (Giveaway **#{nummer}**)**",
+        description=f"Er is een nieuwe winnaar gekozen voor **{prijs}**!",
+        color=discord.Color.from_rgb(241, 196, 15),
+        timestamp=datetime.datetime.now(datetime.timezone.utc)
+    )
+    embed.add_field(name="🎁 Prijs", value=f"**{prijs}**", inline=False)
+    embed.add_field(name="🎉 Nieuwe Winnaar(s)", value=winnaars_mentions, inline=False)
+    embed.set_footer(text=f"Reroll uitgevoerd door {interaction.user.display_name}")
+
+    await interaction.response.send_message(content=f"🔄 Nieuwe winnaar(s) voor giveaway **{nummer}**: {winnaars_mentions}!", embed=embed)
 
 
 # ==========================================
