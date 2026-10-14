@@ -65,7 +65,7 @@ def check_roles(interaction: discord.Interaction, allowed_role_ids: list[int]) -
 
 
 # ==========================================
-# AUTOMATISCHE TIKTOK UPDATES
+# AUTOMATISCHE TIKTOK UPDATES (ACHTERGROND)
 # ==========================================
 
 @tasks.loop(minutes=5)
@@ -286,7 +286,7 @@ async def globaldm(interaction: discord.Interaction, bericht: str, afbeelding: d
             try:
                 await member.send(embed=embed)
                 succes += 1
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.05)
             except (discord.Forbidden, discord.HTTPException):
                 mislukt += 1
 
@@ -312,6 +312,7 @@ class GiveawayView(discord.ui.View):
 
     @discord.ui.button(label="Meedoen", style=discord.ButtonStyle.success, emoji="🎉", custom_id="giveaway_join")
     async def join_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Direct antwoord om vertraging of timeout te voorkomen
         if interaction.user in self.participants:
             self.participants.remove(interaction.user)
             await interaction.response.send_message("❌ Je bent uit de giveaway gestapt.", ephemeral=True)
@@ -363,7 +364,7 @@ async def giveaway(
         color=discord.Color.from_rgb(88, 101, 242)
     )
     
-    # Heel klein rechtsboven / als auteur tonen: Giveaway nummer
+    # Klein nummer rechtsboven / als auteur tonen
     embed.set_author(name=f"Giveaway #{giv_id}")
 
     embed.add_field(name="🏆 Prijs", value=f"```\n{prijs}\n```", inline=True)
@@ -377,7 +378,6 @@ async def giveaway(
 
     content = tag_rol.mention if tag_rol else None
     
-    # Maak deelnemerslijst en sla op in dictionary voor rerolls
     participants_list = []
     actieve_giveaways[giv_id] = {
         "prijs": prijs,
@@ -500,6 +500,7 @@ async def reroll(interaction: discord.Interaction, nummer: int, hoeveel: int):
     embed.add_field(name="🎉 Nieuwe Winnaar(s)", value=winnaars_mentions, inline=False)
     embed.set_footer(text=f"Reroll uitgevoerd door {interaction.user.display_name}")
 
+    # Het nummer wordt hier netjes dikgedrukt weergegeven in de respons
     await interaction.response.send_message(content=f"🔄 Nieuwe winnaar(s) voor giveaway **{nummer}**: {winnaars_mentions}!", embed=embed)
 
 
