@@ -312,7 +312,6 @@ class GiveawayView(discord.ui.View):
 
     @discord.ui.button(label="Meedoen", style=discord.ButtonStyle.success, emoji="🎉", custom_id="giveaway_join")
     async def join_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Direct antwoord om vertraging of timeout te voorkomen
         if interaction.user in self.participants:
             self.participants.remove(interaction.user)
             await interaction.response.send_message("❌ Je bent uit de giveaway gestapt.", ephemeral=True)
@@ -364,7 +363,6 @@ async def giveaway(
         color=discord.Color.from_rgb(88, 101, 242)
     )
     
-    # Klein nummer rechtsboven / als auteur tonen
     embed.set_author(name=f"Giveaway #{giv_id}")
 
     embed.add_field(name="🏆 Prijs", value=f"```\n{prijs}\n```", inline=True)
@@ -496,12 +494,13 @@ async def reroll(interaction: discord.Interaction, nummer: int, hoeveel: int):
         color=discord.Color.from_rgb(241, 196, 15),
         timestamp=datetime.datetime.now(datetime.timezone.utc)
     )
+    embed.set_author(name=f"Giveaway #{nummer}")
     embed.add_field(name="🎁 Prijs", value=f"**{prijs}**", inline=False)
     embed.add_field(name="🎉 Nieuwe Winnaar(s)", value=winnaars_mentions, inline=False)
     embed.set_footer(text=f"Reroll uitgevoerd door {interaction.user.display_name}")
 
-    # Het nummer wordt hier netjes dikgedrukt weergegeven in de respons
-    await interaction.response.send_message(content=f"🔄 Nieuwe winnaar(s) voor giveaway **{nummer}**: {winnaars_mentions}!", embed=embed)
+    # Geen losse tekst meer boven de embed (content is weggelaten)
+    await interaction.response.send_message(embed=embed)
 
 
 # ==========================================
