@@ -1,18 +1,15 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 import os
-import pathlib
 import random
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
-import feedparser
+from discord.ext import commands
+from dotenv import load_dotenv
 from flask import Flask
 from threading import Thread
 
-print("Script wordt geladen...")
-
-# --- FLASK WEBSERVER VOOR RENDER ---
+# --- FLASK WEB SERVER VOOR RENDER ---
 app = Flask("")
 
 
@@ -31,787 +28,899 @@ def keep_alive():
   t.start()
 
 
-# Start de webserver op de achtergrond
+# Start de webserver direct op de achtergrond
 keep_alive()
 
-# Probeer optioneel python-dotenv te laden (handig voor lokaal testen)
-try:
-  from dotenv import load_dotenv
-
-  env_path = pathlib.Path(__file__).parent / ".env"
-  load_dotenv(dotenv_path=env_path)
-except ImportError:
-  pass
-
+# Laad de configuratie uit het .env bestand
+load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 if not TOKEN:
-  print("FOUT: Geen DISCORD_TOKEN gevonden!")
-  exit()
+  raise ValueError("❌ Geen DISCORD_TOKEN gevonden in het .env bestand!")
 
-# Definieer de Intents
+# Configureer de benodigde intents voor de bot
 intents = discord.Intents.default()
 intents.members = True
+intents.messages = True
 intents.message_content = True
+intents.voice_states = True
+intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# --- CONFIGURATIE: ROL & KANAAL ID'S ---
-ROLE_LOWER_STAFF = 1551318319892529192  # Mute, Warn
-ROLE_HIGHER_STAFF = (
-    1551313880494374962  # Superrol (heeft overal toegang toe)
+# ==========================================
+# CONFIGURATIE & ID'S
+# ==========================================
+UNVERIFIED_ROLE_ID = 1558771402637705316
+VERIFIED_ROLE_ID = 1553800258675409042
+TICKET_COMMAND_ROLE_ID = 1551313880494374962
+ADMIN_SPECIAL_ROLE_ID = (
+    1558498339165700267  # Extra rol met volledige commando-rechten
 )
-ROLE_PARTNER_STAFF = 1551683186629812305  # Partnerad, Eisen
-ROLE_BOTBERICHT_DM_STAFF = (
-    1558518307949256766  # Specifieke rol voor /botbericht, /dm en /globaldm
-)
+VERIFICATION_LOG_CHANNEL_ID = 1558788150086606948
+WELCOME_CHANNEL_ID = 1551311044733968627
+COUNTING_CHANNEL_ID = 1554604994961997918  # Vaste telkanaal ID
 
-LOG_CHANNEL_ID = 1553859972100788228  # Kanaal ID voor Giveaway Logs
-TIKTOK_CHANNEL_ID = 1559164859290226788  # Kanaal ID voor TikTok Updates
+TICKET_ROLE_MAPPING = {
+    "Support": 1551318416353132544,
+    "Marketing": 1551683186629812305,
+    "Management+": 1551314657241858088,
+    "Giveaway Claim": 1551678461930639522,
+}
 
-# TikTok Gegevens
-TIKTOK_USERNAME = "prizenetwork_official"
-TIKTOK_URL = f"https://www.tiktok.com/@{TIKTOK_USERNAME}"
-# RSSHUB / RSS Feed URL voor TikTok updates
-TIKTOK_RSS_URL = f"https://rsshub.app/tiktok/user/@{TIKTOK_USERNAME}"
+VERIFICATION_WORDS = [
+    "VERIFIED",
+    "SECURITY",
+    "DISCORD",
+    "ACCESS",
+    "PROTECT",
+    "WELCOME",
+]
 
-# Unieke ID's bijhouden van gestuurde berichten om dubbele meldingen te voorkomen
-laatst_geziene_tiktok_id = None
+# Logkanalen Mapping
+LOG_CHANNEL_IDS = {
+    "tickets": 1553859073567494334,
+    "leden": 1553860034318958632,
+    "berichten": 1553860126308569261,
+    "call": 1553860165499883591,
+    "role": 1553860220755910806,
+    "kanaal": 1553860275675992064,
+}
 
-# Afbeelding URL
-PRIZE_NETWORK_BANNER = "https://i.ibb.co/bc3100dd0fb5cc6d155b5c7907b0bae8/bc3100dd0fb5cc6d155b5c7907b0bae8.jpg"
+# Geheugen voor het telsysteem en anti-dubbel verwerking
+COUNTING_DATA = {COUNTING_CHANNEL_ID: {"current": 0, "last_user": None}}
+PROCESSED_MESSAGES = set()
+MESSAGE_LOCK = asyncio.Lock()
 
 
-# Controleer of de gebruiker de juiste rollen heeft
-def check_roles(
-    interaction: discord.Interaction, allowed_role_ids: list[int]
-) -> bool:
-  if not interaction.guild:
-    return False
+async def get_log_channel(
+    guild: discord.Guild, name: str
+) -> discord.TextChannel | None:
+  """Haalt het opgevraagde logkanaal op via de cache of Discord API."""
+  channel_id = LOG_CHANNEL_IDS.get(name)
+  if not channel_id:
+    return None
+  channel = guild.get_channel(channel_id)
+  if not channel:
+    try:
+      channel = await guild.fetch_channel(channel_id)
+    except Exception:
+      return None
+  return channel
 
-  user_role_ids = [role.id for role in interaction.user.roles]
 
-  # Als de gebruiker de hogere staff rol heeft, altijd toestemming geven
-  if ROLE_HIGHER_STAFF in user_role_ids:
+def has_admin_permissions(member: discord.Member) -> bool:
+  """Controleert of een gebruiker administrator is OF de speciale beheerdersrol heeft."""
+  if member.guild_permissions.administrator:
     return True
+  if any(role.id == ADMIN_SPECIAL_ROLE_ID for role in member.roles):
+    return True
+  return False
 
-  return any(role_id in user_role_ids for role_id in allowed_role_ids)
+
+def is_staff_member(member: discord.Member) -> bool:
+  """Controleert of een gebruiker staff is (via ticket rollen, admin of speciale rollen)."""
+  allowed_roles = list(TICKET_ROLE_MAPPING.values())
+  if any(r.id in allowed_roles for r in member.roles):
+    return True
+  return has_admin_permissions(member)
 
 
 # ==========================================
-# AUTOMATISCHE TIKTOK UPDATES (ELKE 5 MINUTEN)
+# MODERATIE VIEW (Voor Verificatie Logs)
 # ==========================================
+class ModerationActionView(discord.ui.View):
 
+  def __init__(self, target_member_id: int):
+    super().__init__(timeout=None)
+    self.target_member_id = target_member_id
 
-@tasks.loop(minutes=5)
-async def tiktok_checker():
-  global laatst_geziene_tiktok_id
-  try:
-    kanaal = bot.get_channel(TIKTOK_CHANNEL_ID)
-    if not kanaal:
+  @discord.ui.button(
+      label="Ban User",
+      style=discord.ButtonStyle.danger,
+      emoji="🔨",
+      custom_id="mod_ban_btn_v21",
+  )
+  async def ban_button(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    await interaction.response.defer(ephemeral=True)
+    if not has_admin_permissions(interaction.user) and not interaction.user.guild_permissions.ban_members:
+      await interaction.followup.send(
+          "❌ Geen permissie om leden te bannen.", ephemeral=True
+      )
+      return
+    guild = interaction.guild
+    member = guild.get_member(self.target_member_id)
+    try:
+      if member:
+        await guild.ban(
+            member, reason=f"Gebanned via log door {interaction.user}"
+        )
+      else:
+        user = await bot.fetch_user(self.target_member_id)
+        await guild.ban(user, reason=f"Gebanned via log door {interaction.user}")
+      for child in self.children:
+        child.disabled = True
+      await interaction.message.edit(view=self)
+      await interaction.followup.send(
+          f"🔨 Gebruiker is gebanned door {interaction.user.mention}.",
+          ephemeral=False,
+      )
+    except Exception as e:
+      await interaction.followup.send(f"❌ Fout bij bannen: {e}", ephemeral=True)
+
+  @discord.ui.button(
+      label="Kick User",
+      style=discord.ButtonStyle.secondary,
+      emoji="🛡️",
+      custom_id="mod_kick_btn_v21",
+  )
+  async def kick_button(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    await interaction.response.defer(ephemeral=True)
+    if not has_admin_permissions(interaction.user) and not interaction.user.guild_permissions.kick_members:
+      await interaction.followup.send(
+          "❌ Geen permissie om leden te kicken.", ephemeral=True
+      )
+      return
+    guild = interaction.guild
+    member = guild.get_member(self.target_member_id)
+    try:
+      if member:
+        await guild.kick(
+            member, reason=f"Gekicked via log door {interaction.user}"
+        )
+        for child in self.children:
+          child.disabled = True
+        await interaction.message.edit(view=self)
+        await interaction.followup.send(
+            f"🛡️ Gebruiker is gekicked door {interaction.user.mention}.",
+            ephemeral=False,
+        )
+      else:
+        await interaction.followup.send(
+            "⚠️ Gebruiker niet gevonden op de server.", ephemeral=True
+        )
+    except Exception as e:
+      await interaction.followup.send(f"❌ Fout bij kicken: {e}", ephemeral=True)
+
+  @discord.ui.button(
+      label="Untimeout User",
+      style=discord.ButtonStyle.success,
+      emoji="🔊",
+      custom_id="mod_untimeout_btn_v21",
+  )
+  async def untimeout_button(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    await interaction.response.defer(ephemeral=True)
+    if not has_admin_permissions(interaction.user) and not interaction.user.guild_permissions.moderate_members:
+      await interaction.followup.send(
+          "❌ Geen permissie om timeouts te beheren.", ephemeral=True
+      )
+      return
+    guild = interaction.guild
+    member = guild.get_member(self.target_member_id)
+    if not member:
+      try:
+        member = await guild.fetch_member(self.target_member_id)
+      except Exception:
+        member = None
+
+    if not member:
+      await interaction.followup.send(
+          "⚠️ Gebruiker is niet langer aanwezig op de server.", ephemeral=True
+      )
       return
 
-    feed = feedparser.parse(TIKTOK_RSS_URL)
-    if feed.entries:
-      meest_recente = feed.entries[0]
-      bericht_id = (
-          meest_recente.id
-          if hasattr(meest_recente, "id")
-          else meest_recente.link
+    try:
+      await member.timeout(
+          None, reason=f"Timeout opgeheven door {interaction.user}"
+      )
+      button.disabled = True
+      await interaction.message.edit(view=self)
+      await interaction.followup.send(
+          f"🔊 Timeout van {member.mention} is succesvol opgeheven door"
+          f" {interaction.user.mention}.",
+          ephemeral=False,
+      )
+    except Exception as e:
+      await interaction.followup.send(
+          f"❌ Fout bij opheffen timeout: {e}", ephemeral=True
       )
 
-      # Zorg dat de eerste keer opstarten niet oude berichten direct spamt
-      if laatst_geziene_tiktok_id is None:
-        laatst_geziene_tiktok_id = bericht_id
+
+# ==========================================
+# VERIFICATIE SYSTEEM
+# ==========================================
+class VerificationModal(discord.ui.Modal):
+
+  def __init__(self, target_word: str):
+    super().__init__(title="Server Beveiliging Verificatie")
+    self.target_word = target_word
+    self.word_input = discord.ui.TextInput(
+        label=f"Typ exact het woord: {target_word}",
+        placeholder=target_word,
+        required=True,
+        max_length=20,
+    )
+    self.add_item(self.word_input)
+
+  async def on_submit(self, interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    if self.word_input.value.strip().upper() == self.target_word:
+      guild = interaction.guild
+      member = interaction.user
+      unverified_role = guild.get_role(UNVERIFIED_ROLE_ID)
+      verified_role = guild.get_role(VERIFIED_ROLE_ID)
+
+      if not unverified_role or not verified_role:
+        await interaction.followup.send(
+            "⚠️ Configuratiefout: Rollen niet gevonden.", ephemeral=True
+        )
         return
 
-      if bericht_id != laatst_geziene_tiktok_id:
-        laatst_geziene_tiktok_id = bericht_id
-
-        titel = (
-            meest_recente.title
-            if hasattr(meest_recente, "title")
-            else "Nieuwe update!"
-        )
-        link = meest_recente.link
-
-        embed = discord.Embed(
-            title="🎵 **NIEUWE TIKTOK UPDATE!**",
-            description=(
-                f"**{titel}**\n\nBekijk de video/live via onderstaande"
-                f" link:\n{link}"
-            ),
-            color=discord.Color.from_rgb(254, 44, 85),
-            timestamp=datetime.datetime.now(datetime.timezone.utc),
-        )
-        embed.set_author(
-            name="Prize Network TikTok",
-            icon_url="https://pngimg.com/uploads/tiktok/tiktok_PNG13.png",
-            url=TIKTOK_URL,
-        )
-        embed.set_image(url=PRIZE_NETWORK_BANNER)
-        embed.set_footer(text="Prize Network Socials")
-
-        # ZONDER PING VERSTUREN
-        await kanaal.send(
-            embed=embed, allowed_mentions=discord.AllowedMentions.none()
-        )
-  except Exception as e:
-    print(f"Fout bij het ophalen van TikTok updates: {e}")
-
-
-@bot.event
-async def on_ready():
-  print(f"Bot is succesvol ingelogd als {bot.user}!")
-
-  # Start de TikTok achtergrondtaak als deze nog niet draait
-  if not tiktok_checker.is_running():
-    tiktok_checker.start()
-
-  try:
-    synced = await bot.tree.sync()
-    print(f"Gesynchroniseerd: {len(synced)} slash commands globaal.")
-  except Exception as e:
-    print(f"Fout bij synchroniseren van commands: {e}")
-
-
-# ==========================================
-# 1. MODERATIE COMMANDS
-# ==========================================
-
-
-@bot.tree.command(
-    name="warn", description="Geef een officiële waarschuwing aan een lid."
-)
-async def warn(
-    interaction: discord.Interaction, lid: discord.Member, reden: str
-):
-  if not check_roles(interaction, [ROLE_LOWER_STAFF, ROLE_HIGHER_STAFF]):
-    return await interaction.response.send_message(
-        "❌ Je hebt geen rechten voor dit commando.", ephemeral=True
-    )
-
-  embed = discord.Embed(
-      title="⚠️ OFFICIËLE WAARSCHUWING",
-      description=f"Er is een officiële waarschuwing uitgedeeld aan {lid.mention}.",
-      color=discord.Color.from_rgb(255, 170, 0),
-      timestamp=datetime.datetime.now(datetime.timezone.utc),
-  )
-  embed.add_field(
-      name="👤 Gebruiker", value=f"{lid.mention} (`{lid.id}`)", inline=True
-  )
-  embed.add_field(
-      name="🛡️ Moderator", value=f"{interaction.user.mention}", inline=True
-  )
-  embed.add_field(name="📝 Reden", value=f"```\n{reden}\n```", inline=False)
-  embed.set_thumbnail(url=lid.display_avatar.url)
-  embed.set_footer(
-      text="Prize Network Moderatie",
-      icon_url=(
-          interaction.guild.icon.url
-          if interaction.guild and interaction.guild.icon
-          else None
-      ),
-  )
-
-  await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name="mute", description="Tijdelijke mute (timeout) voor een lid.")
-async def mute(
-    interaction: discord.Interaction,
-    lid: discord.Member,
-    minuten: int,
-    reden: str,
-):
-  if not check_roles(interaction, [ROLE_LOWER_STAFF, ROLE_HIGHER_STAFF]):
-    return await interaction.response.send_message(
-        "❌ Je hebt geen rechten voor dit commando.", ephemeral=True
-    )
-
-  duur = datetime.timedelta(minutes=minuten)
-  await lid.timeout(duur, reason=reden)
-
-  embed = discord.Embed(
-      title="🤫 GEBRUIKER GEMUTED",
-      description=f"{lid.mention} is tijdelijk stilgezet.",
-      color=discord.Color.from_rgb(230, 126, 34),
-      timestamp=datetime.datetime.now(datetime.timezone.utc),
-  )
-  embed.add_field(
-      name="👤 Gebruiker", value=f"{lid.mention} (`{lid.id}`)", inline=True
-  )
-  embed.add_field(name="⏱️ Duur", value=f"**{minuten} minuten**", inline=True)
-  embed.add_field(
-      name="🛡️ Moderator", value=f"{interaction.user.mention}", inline=True
-  )
-  embed.add_field(name="📝 Reden", value=f"```\n{reden}\n```", inline=False)
-  embed.set_thumbnail(url=lid.display_avatar.url)
-  embed.set_footer(
-      text="Prize Network Moderatie",
-      icon_url=(
-          interaction.guild.icon.url
-          if interaction.guild and interaction.guild.icon
-          else None
-      ),
-  )
-
-  await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name="kick", description="Kick een lid uit de server.")
-async def kick(
-    interaction: discord.Interaction,
-    lid: discord.Member,
-    reden: str = "Geen reden opgegeven",
-):
-  if not check_roles(interaction, [ROLE_HIGHER_STAFF]):
-    return await interaction.response.send_message(
-        "❌ Je hebt geen rechten voor dit commando.", ephemeral=True
-    )
-
-  await lid.kick(reason=reden)
-
-  embed = discord.Embed(
-      title="👢 GEBRUIKER GEKICKT",
-      description=f"{lid.mention} is verwijderd uit de server.",
-      color=discord.Color.from_rgb(231, 76, 60),
-      timestamp=datetime.datetime.now(datetime.timezone.utc),
-  )
-  embed.add_field(
-      name="👤 Gebruiker", value=f"**{lid.display_name}** (`{lid.id}`)", inline=True
-  )
-  embed.add_field(
-      name="🛡️ Moderator", value=f"{interaction.user.mention}", inline=True
-  )
-  embed.add_field(name="📝 Reden", value=f"```\n{reden}\n```", inline=False)
-  embed.set_footer(
-      text="Prize Network Moderatie",
-      icon_url=(
-          interaction.guild.icon.url
-          if interaction.guild and interaction.guild.icon
-          else None
-      ),
-  )
-
-  await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name="ban", description="Ban een lid uit de server.")
-async def ban(
-    interaction: discord.Interaction,
-    lid: discord.Member,
-    reden: str = "Geen reden opgegeven",
-):
-  if not check_roles(interaction, [ROLE_HIGHER_STAFF]):
-    return await interaction.response.send_message(
-        "❌ Je hebt geen rechten voor dit commando.", ephemeral=True
-    )
-
-  await lid.ban(reason=reden)
-
-  embed = discord.Embed(
-      title="🔨 GEBRUIKER VERBANNEN",
-      description=f"**{lid.display_name}** is permanent verbannen uit de server.",
-      color=discord.Color.from_rgb(155, 89, 182),
-      timestamp=datetime.datetime.now(datetime.timezone.utc),
-  )
-  embed.add_field(
-      name="👤 Gebruiker", value=f"**{lid.display_name}** (`{lid.id}`)", inline=True
-  )
-  embed.add_field(
-      name="🛡️ Moderator", value=f"{interaction.user.mention}", inline=True
-  )
-  embed.add_field(name="📝 Reden", value=f"```\n{reden}\n```", inline=False)
-  embed.set_footer(
-      text="Prize Network Moderatie",
-      icon_url=(
-          interaction.guild.icon.url
-          if interaction.guild and interaction.guild.icon
-          else None
-      ),
-  )
-
-  await interaction.response.send_message(embed=embed)
-
-
-# ==========================================
-# 2. BOTBERICHT, DM & GLOBALDM COMMANDS
-# ==========================================
-
-
-@bot.tree.command(
-    name="botbericht", description="Stuur een gewoon bericht namens de bot."
-)
-async def botbericht(
-    interaction: discord.Interaction,
-    bericht: str,
-    afbeelding: discord.Attachment = None,
-):
-  if not check_roles(
-      interaction, [ROLE_BOTBERICHT_DM_STAFF, ROLE_HIGHER_STAFF]
-  ):
-    return await interaction.response.send_message(
-        "❌ Je hebt geen rechten voor dit commando.", ephemeral=True
-    )
-
-  if interaction.channel:
-    if afbeelding:
-      file = await afbeelding.to_file()
-      await interaction.channel.send(content=bericht, file=file)
-    else:
-      await interaction.channel.send(content=bericht)
-
-  await interaction.response.send_message(
-      "✨ Bericht succesvol geplaatst!", ephemeral=True
-  )
-
-
-@bot.tree.command(
-    name="dm", description="Stuur een privébericht naar een gebruiker."
-)
-async def dm(
-    interaction: discord.Interaction,
-    gebruiker: discord.User,
-    bericht: str,
-    afbeelding: discord.Attachment = None,
-):
-  if not check_roles(
-      interaction, [ROLE_BOTBERICHT_DM_STAFF, ROLE_HIGHER_STAFF]
-  ):
-    return await interaction.response.send_message(
-        "❌ Je hebt geen rechten voor dit commando.", ephemeral=True
-    )
-
-  try:
-    embed = discord.Embed(
-        title="📩 **BERICHT VAN PRIZE NETWORK**",
-        description=bericht,
-        color=discord.Color.from_rgb(155, 89, 182),
-        timestamp=datetime.datetime.now(datetime.timezone.utc),
-    )
-    if afbeelding:
-      embed.set_image(url=afbeelding.url)
-
-    embed.set_footer(
-        text="Verzonden door de staff van Prize Network",
-        icon_url=(
-            interaction.guild.icon.url
-            if interaction.guild and interaction.guild.icon
-            else None
-        ),
-    )
-
-    await gebruiker.send(embed=embed)
-    await interaction.response.send_message(
-        f"✅ DM succesvol verzonden naar {gebruiker.mention}.", ephemeral=True
-    )
-  except discord.Forbidden:
-    await interaction.response.send_message(
-        "❌ Kon de DM niet versturen. De gebruiker heeft hun DM's waarschijnlijk"
-        " uitstaan.",
-        ephemeral=True,
-    )
-
-
-@bot.tree.command(
-    name="globaldm",
-    description="Stuur een privébericht naar ALLE leden in de server.",
-)
-async def globaldm(
-    interaction: discord.Interaction,
-    bericht: str,
-    afbeelding: discord.Attachment = None,
-):
-  if not check_roles(
-      interaction, [ROLE_BOTBERICHT_DM_STAFF, ROLE_HIGHER_STAFF]
-  ):
-    return await interaction.response.send_message(
-        "❌ Je hebt geen rechten voor dit commando.", ephemeral=True
-    )
-
-  if not interaction.guild:
-    return await interaction.response.send_message(
-        "❌ Dit commando kan alleen in een server gebruikt worden.",
-        ephemeral=True,
-    )
-
-  await interaction.response.send_message(
-      "🚀 **Global DM is op de achtergrond gestart!** Je krijgt een seintje"
-      " zodra het klaar is.",
-      ephemeral=True,
-  )
-
-  embed = discord.Embed(
-      title="📢 **MEDEDELING VAN PRIZE NETWORK**",
-      description=bericht,
-      color=discord.Color.from_rgb(52, 152, 219),
-      timestamp=datetime.datetime.now(datetime.timezone.utc),
-  )
-  if afbeelding:
-    embed.set_image(url=afbeelding.url)
-  else:
-    embed.set_image(url=PRIZE_NETWORK_BANNER)
-
-  embed.set_footer(
-      text="Prize Network Community",
-      icon_url=(
-          interaction.guild.icon.url
-          if interaction.guild and interaction.guild.icon
-          else None
-      ),
-  )
-
-  async def verstuur_achtergrond():
-    succes = 0
-    mislukt = 0
-
-    for member in interaction.guild.members:
-      if member.bot:
-        continue
       try:
-        await member.send(embed=embed)
-        succes += 1
-        await asyncio.sleep(0.1)
-      except (discord.Forbidden, discord.HTTPException):
-        mislukt += 1
+        if unverified_role in member.roles:
+          await member.remove_roles(
+              unverified_role, reason="Verificatie voltooid"
+          )
+        await member.add_roles(verified_role, reason="Verificatie voltooid")
+        await interaction.followup.send(
+            "✅ Verificatie geslaagd! Je hebt nu toegang.", ephemeral=True
+        )
 
-    if interaction.channel:
-      await interaction.channel.send(
-          f"✅ **Global DM Voltooid door {interaction.user.mention}!**\n• 📤"
-          f" Succesvol: **{succes}** leden\n• ❌ Mislukt (DM's uit):"
-          f" **{mislukt}** leden"
+        log_channel = guild.get_channel(VERIFICATION_LOG_CHANNEL_ID)
+        if not log_channel:
+          try:
+            log_channel = await guild.fetch_channel(VERIFICATION_LOG_CHANNEL_ID)
+          except Exception:
+            log_channel = None
+
+        if log_channel:
+          created_at = member.created_at
+          now = datetime.datetime.now(datetime.timezone.utc)
+          delta = now - created_at
+
+          years = delta.days // 365
+          months = (delta.days % 365) // 30
+          days = (delta.days % 365) % 30
+          age_str = f"{years} jaar, {months} maanden, {days} dagen"
+
+          embed = discord.Embed(
+              title="🛡️ Lid Geverifieerd",
+              description=(
+                  f"Gebruiker {member.mention} heeft de verificatie doorlopen."
+              ),
+              color=discord.Color.green(),
+              timestamp=now,
+          )
+          if member.display_avatar:
+            embed.set_thumbnail(url=member.display_avatar.url)
+          embed.add_field(name="👤 Naam", value=f"`{member.name}`", inline=True)
+          embed.add_field(name="🆔 ID", value=f"`{member.id}`", inline=True)
+          embed.add_field(
+              name="📅 Leeftijd",
+              value=f"{created_at.strftime('%d-%m-%Y')} ({age_str})",
+              inline=False,
+          )
+
+          view = ModerationActionView(target_member_id=member.id)
+          await log_channel.send(embed=embed, view=view)
+      except Exception as e:
+        await interaction.followup.send(
+            f"❌ Fout bij toekennen rollen: {e}", ephemeral=True
+        )
+    else:
+      await interaction.followup.send(
+          "❌ Verificatie mislukt. Onjuist woord.", ephemeral=True
       )
 
-  asyncio.create_task(verstuur_achtergrond())
 
+class VerificationView(discord.ui.View):
 
-# ==========================================
-# 3. LUXE GIVEAWAY SYSTEM + LOGGING
-# ==========================================
-
-
-class GiveawayView(discord.ui.View):
-
-  def __init__(self, embed: discord.Embed):
+  def __init__(self):
     super().__init__(timeout=None)
-    self.participants = []
-    self.embed = embed
 
   @discord.ui.button(
-      label="Meedoen",
+      label="Verifiëren",
       style=discord.ButtonStyle.success,
-      emoji="🎉",
-      custom_id="giveaway_join",
+      emoji="🔒",
+      custom_id="verify_btn_v21",
   )
-  async def join_giveaway(
+  async def verify_button(
       self, interaction: discord.Interaction, button: discord.ui.Button
   ):
-    if interaction.user in self.participants:
-      self.participants.remove(interaction.user)
-      await interaction.response.send_message(
-          "❌ Je bent uit de giveaway gestapt.", ephemeral=True
+    await interaction.response.send_modal(
+        VerificationModal(target_word=random.choice(VERIFICATION_WORDS))
+    )
+
+
+# ==========================================
+# TICKET SYSTEEM (Alleen staff kan sluiten)
+# ==========================================
+class TicketControlView(discord.ui.View):
+
+  def __init__(self, opener: discord.Member):
+    super().__init__(timeout=None)
+    self.opener = opener
+    self.claimed_by = None
+
+  @discord.ui.button(
+      label="Claim Ticket",
+      style=discord.ButtonStyle.primary,
+      emoji="📌",
+      custom_id="ticket_claim_v21",
+  )
+  async def claim_ticket(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    channel = interaction.channel
+    staff_member = interaction.user
+
+    if not is_staff_member(staff_member):
+      await interaction.followup.send(
+          "❌ Alleen medewerkers kunnen dit claimen.", ephemeral=True
       )
-    else:
-      self.participants.append(interaction.user)
-      await interaction.response.send_message(
-          "🎉 Je doet nu succesvol mee aan de giveaway!", ephemeral=True
+      return
+
+    self.claimed_by = staff_member
+    allowed_roles = list(TICKET_ROLE_MAPPING.values())
+    try:
+      for role_id in allowed_roles:
+        role = guild.get_role(role_id)
+        if role:
+          await channel.set_permissions(role, send_messages=False)
+      await channel.set_permissions(
+          staff_member, send_messages=True, view_channel=True
       )
 
-    for index, field in enumerate(self.embed.fields):
-      if "Deelnemers" in field.name:
-        self.embed.set_field_at(
-            index,
-            name="👥 Deelnemers",
-            value=f"```\n{len(self.participants)} deelnemers\n```",
-            inline=True,
-        )
-        break
+      button.disabled = True
+      button.label = f"Geclaimd door {staff_member.display_name}"
+      await interaction.message.edit(view=self)
+      await interaction.followup.send(f"📌 Geclaimd door {staff_member.mention}.")
+    except Exception as e:
+      await interaction.followup.send(f"❌ Fout: {e}", ephemeral=True)
 
-    if interaction.message:
+  @discord.ui.button(
+      label="Sluit Ticket",
+      style=discord.ButtonStyle.danger,
+      emoji="🔒",
+      custom_id="ticket_close_v21",
+  )
+  async def close_ticket(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    await interaction.response.defer(ephemeral=True)
+    closer = interaction.user
+
+    if not is_staff_member(closer):
+      await interaction.followup.send(
+          "❌ Alleen medewerkers mogen dit ticket sluiten.", ephemeral=True
+      )
+      return
+
+    guild = interaction.guild
+    channel = interaction.channel
+
+    await interaction.followup.send(
+        "⚠️ Transcript wordt gemaakt, kanaal sluit over 5 seconden...",
+        ephemeral=False,
+    )
+
+    transcript = f"<html><body><h2>Transcript: {channel.name}</h2><hr>"
+    async for msg in channel.history(limit=None, oldest_first=True):
+      transcript += f"<p><b>{msg.author}</b> ({msg.created_at.strftime('%d-%m-%Y %H:%M')}): {msg.content}</p>"
+    transcript += "</body></html>"
+
+    filename = f"transcript-{channel.name}.html"
+    with open(filename, "w", encoding="utf-8") as f:
+      f.write(transcript)
+
+    log_channel = await get_log_channel(guild, "tickets")
+    if log_channel:
+      embed = discord.Embed(
+          title=f"🔒 Ticket Gearchiveerd — {channel.name}",
+          color=discord.Color.red(),
+      )
+      embed.add_field(name="📂 Geopend door", value=self.opener.mention, inline=True)
+      embed.add_field(name="🔒 Gesloten door", value=closer.mention, inline=True)
+      file = discord.File(filename)
+      await log_channel.send(embed=embed, file=file)
+
+    if os.path.exists(filename):
+      os.remove(filename)
+
+    await asyncio.sleep(5)
+    try:
+      await channel.delete()
+    except Exception:
+      pass
+
+
+class TicketCreateView(discord.ui.View):
+
+  def __init__(self):
+    super().__init__(timeout=None)
+
+  async def create_ticket(
+      self, interaction: discord.Interaction, ticket_type: str
+  ):
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    member = interaction.user
+    category_name = f"{ticket_type} Tickets"
+    safe_name = (
+        ticket_type.lower().replace("+", "-plus").replace(" ", "-")
+    )
+
+    existing = discord.utils.get(
+        guild.text_channels, name=f"{safe_name}-{member.name.lower()}"
+    )
+    if existing:
+      await interaction.followup.send(
+          f"❌ Je hebt al een open ticket: {existing.mention}", ephemeral=True
+      )
+      return
+
+    category = discord.utils.get(guild.categories, name=category_name)
+    if not category:
       try:
-        await interaction.message.edit(embed=self.embed)
-      except discord.HTTPException:
+        category = await guild.create_category(category_name)
+      except Exception:
         pass
 
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        member: discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, read_message_history=True
+        ),
+        guild.me: discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, manage_channels=True
+        ),
+    }
+
+    staff_role = guild.get_role(TICKET_ROLE_MAPPING.get(ticket_type))
+    if staff_role:
+      overwrites[staff_role] = discord.PermissionOverwrite(
+          view_channel=True, send_messages=True, read_message_history=True
+      )
+
+    ticket_channel = await guild.create_text_channel(
+        name=f"{safe_name}-{member.name}",
+        category=category,
+        overwrites=overwrites,
+    )
+
+    embed = discord.Embed(
+        title=f"🎫 {ticket_type} Ticket",
+        description=f"Welkom {member.mention}! Stel hieronder je vraag.",
+        color=discord.Color.blue(),
+    )
+    await ticket_channel.send(
+        content=staff_role.mention if staff_role else "",
+        embed=embed,
+        view=TicketControlView(opener=member),
+    )
+    await interaction.followup.send(
+        f"✅ Ticket aangemaakt: {ticket_channel.mention}", ephemeral=True
+    )
+
   @discord.ui.button(
-      label="Aantal Deelnemers",
-      style=discord.ButtonStyle.secondary,
-      emoji="📊",
-      custom_id="giveaway_count",
+      label="Support",
+      style=discord.ButtonStyle.primary,
+      emoji="🛠️",
+      custom_id="btn_support_v21",
   )
-  async def count_participants(
+  async def support(
       self, interaction: discord.Interaction, button: discord.ui.Button
   ):
-    await interaction.response.send_message(
-        f"📊 Er doen op dit moment **{len(self.participants)}** mensen mee aan"
-        " deze giveaway!",
+    await self.create_ticket(interaction, "Support")
+
+  @discord.ui.button(
+      label="Marketing",
+      style=discord.ButtonStyle.primary,
+      emoji="📈",
+      custom_id="btn_marketing_v21",
+  )
+  async def marketing(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    await self.create_ticket(interaction, "Marketing")
+
+  @discord.ui.button(
+      label="Management+",
+      style=discord.ButtonStyle.primary,
+      emoji="👑",
+      custom_id="btn_management_v21",
+  )
+  async def management(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    await self.create_ticket(interaction, "Management+")
+
+  @discord.ui.button(
+      label="Giveaway Claim",
+      style=discord.ButtonStyle.success,
+      emoji="🎉",
+      custom_id="btn_giveaway_v21",
+  )
+  async def giveaway(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    await self.create_ticket(interaction, "Giveaway Claim")
+
+
+# ==========================================
+# OPSTARTEN & COMMANDS
+# ==========================================
+@bot.event
+async def on_ready():
+  print(f"✅ Ingelogd als {bot.user}!")
+  bot.add_view(VerificationView())
+  bot.add_view(TicketCreateView())
+
+  try:
+    await bot.tree.sync()
+    print("🔗 Slash-commando's gesynchroniseerd.")
+  except Exception as e:
+    print(f"❌ Fout bij sync: {e}")
+
+
+# ==========================================
+# COMMANDO: GIVAWAY REROLL
+# ==========================================
+@bot.tree.command(
+    name="reroll",
+    description=(
+        "Herloting voor een giveaway door willekeurige nieuwe winnaars te"
+        " kiezen."
+    ),
+)
+@app_commands.describe(
+    message_id="Het Bericht-ID van de giveaway",
+    aantal="Aantal nieuwe winnaars dat getrokken moet worden",
+)
+async def reroll(
+    interaction: discord.Interaction, message_id: str, aantal: int = 1
+):
+  await interaction.response.defer(ephemeral=True)
+  if not has_admin_permissions(interaction.user):
+    await interaction.followup.send(
+        "❌ Alleen beheerders kunnen het Reroll commando gebruiken.",
         ephemeral=True,
     )
+    return
 
-
-@bot.tree.command(name="giveaway", description="Start een luxe giveaway.")
-async def giveaway(
-    interaction: discord.Interaction,
-    prijs: str,
-    aantal_winnaars: int,
-    duur_minuten: int,
-    tag_rol: discord.Role = None,
-):
-  if not check_roles(interaction, [ROLE_HIGHER_STAFF]):
-    return await interaction.response.send_message(
-        "❌ Je hebt geen rechten voor dit commando.", ephemeral=True
+  try:
+    target_message_id = int(message_id.strip())
+    target_message = await interaction.channel.fetch_message(target_message_id)
+  except Exception:
+    await interaction.followup.send(
+        "❌ Bericht niet gevonden in dit kanaal. Zorg dat je het commando in"
+        " hetzelfde kanaal gebruikt als het giveaway-bericht.",
+        ephemeral=True,
     )
+    return
 
-  if not interaction.channel:
-    return await interaction.response.send_message(
-        "❌ Dit commando werkt alleen in een kanaal.", ephemeral=True
+  users = set()
+  for reaction in target_message.reactions:
+    async for user in reaction.users():
+      if not user.bot:
+        users.add(user)
+
+  if not users:
+    await interaction.followup.send(
+        "❌ Geen geldige inzendingen (of reacties) gevonden op dat bericht.",
+        ephemeral=True,
     )
+    return
 
-  eind_tijd = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
-      minutes=duur_minuten
-  )
-  timestamp = f"<t:{int(eind_tijd.timestamp())}:R>"
-  exacte_tijd = f"<t:{int(eind_tijd.timestamp())}:f>"
+  users_list = list(users)
+  winners_count = min(aantal, len(users_list))
+  winners = random.sample(users_list, winners_count)
+
+  winners_mentions = ", ".join([w.mention for w in winners])
 
   embed = discord.Embed(
-      title=f"🎉 **GIVEAWAY: {prijs.upper()}** 🎉",
+      title="🎉 Giveaway Reroll Resultaat!",
       description=(
-          "Klik op de groene knop **'Meedoen 🎉'** hieronder om kans te maken!"
+          f"Gefeliciteerd {winners_mentions}! Je bent de nieuwe winnaar van de"
+          " giveaway!"
       ),
-      color=discord.Color.from_rgb(88, 101, 242),
+      color=discord.Color.gold(),
+      timestamp=datetime.datetime.now(datetime.timezone.utc),
+  )
+  await interaction.channel.send(content=f"🎉 {winners_mentions}", embed=embed)
+  await interaction.followup.send(
+      f"✅ Succesvol {winners_count} nieuwe winnaar(s) getrokken!", ephemeral=True
   )
 
-  embed.add_field(name="🏆 Prijs", value=f"```\n{prijs}\n```", inline=True)
-  embed.add_field(
-      name="👑 Winnaar(s)",
-      value=f"```\n{aantal_winnaars} winnaar(s)\n```",
-      inline=True,
-  )
-  embed.add_field(
-      name="👥 Deelnemers", value="```\n0 deelnemers\n```", inline=True
-  )
-  embed.add_field(
-      name="⏳ Resterende Tijd",
-      value=f"Eindigt {timestamp}\n({exacte_tijd})",
-      inline=False,
-  )
-  embed.add_field(
-      name="🎙️ Gehost door", value=interaction.user.mention, inline=False
-  )
 
-  embed.set_image(url=PRIZE_NETWORK_BANNER)
-  embed.set_footer(
-      text="Prize Network • Veel succes!",
-      icon_url=(
-          interaction.guild.icon.url
-          if interaction.guild and interaction.guild.icon
-          else None
+# ==========================================
+# PANEEL COMMANDOS
+# ==========================================
+@bot.tree.command(
+    name="verificatiepanelpost",
+    description="Plaats het verificatiepaneel in dit kanaal.",
+)
+async def verificatiepanelpost(interaction: discord.Interaction):
+  if not has_admin_permissions(interaction.user):
+    await interaction.response.send_message(
+        "❌ Alleen beheerders kunnen dit commando gebruiken.", ephemeral=True
+    )
+    return
+
+  embed = discord.Embed(
+      title="🔒 Server Verificatie",
+      description=(
+          "Welkom op de server! Om volledige toegang te krijgen tot de"
+          " kanalen, dien je jezelf te verifiëren door op onderstaande knop te"
+          " klikken en de instructies te volgen."
       ),
+      color=discord.Color.blue(),
   )
+  embed.set_footer(text="Beveiligingssysteem • Klik op de knop om te starten.")
 
-  content = tag_rol.mention if tag_rol else None
-  view = GiveawayView(embed=embed)
+  try:
+    await interaction.channel.send(embed=embed, view=VerificationView())
+    await interaction.response.send_message(
+        "✅ Het verificatiepaneel is succesvol geplaatst in dit kanaal.",
+        ephemeral=True,
+    )
+  except Exception as e:
+    await interaction.response.send_message(
+        f"❌ Fout bij plaatsen paneel: {e}", ephemeral=True
+    )
 
-  await interaction.response.send_message(
-      "✅ Giveaway succesvol gestart!", ephemeral=True
+
+@bot.tree.command(name="ticketpanelpost", description="Plaats het ticketpaneel.")
+async def ticketpanelpost(interaction: discord.Interaction):
+  if TICKET_COMMAND_ROLE_ID not in [
+      r.id for r in interaction.user.roles
+  ] and not has_admin_permissions(interaction.user):
+    await interaction.response.send_message(
+        "❌ Geen rechten om dit paneel te plaatsen.", ephemeral=True
+    )
+    return
+  embed = discord.Embed(
+      title="🎫 Ticket Systeem",
+      description=(
+          "Kies hieronder een categorie om een ticket te openen."
+      ),
+      color=discord.Color.purple(),
   )
-  message = await interaction.channel.send(content=content, embed=embed, view=view)
+  try:
+    await interaction.channel.send(embed=embed, view=TicketCreateView())
+    await interaction.response.send_message(
+        "✅ Ticketpaneel geplaatst.", ephemeral=True
+    )
+  except Exception as e:
+    await interaction.response.send_message(
+        f"❌ Fout bij plaatsen paneel: {e}", ephemeral=True
+    )
 
-  # --- LOG: GIVEAWAY GESTART ---
-  log_kanaal = bot.get_channel(LOG_CHANNEL_ID)
-  if log_kanaal:
-    start_log_embed = discord.Embed(
-        title="📋 **LOG: GIVEAWAY GESTART**",
+
+@bot.tree.command(
+    name="telkanalsetup",
+    description=(
+        "Plaats de uitleg voor het telsysteem in het officiële telkanaal."
+    ),
+)
+async def telkanalsetup(interaction: discord.Interaction):
+  if not has_admin_permissions(interaction.user):
+    await interaction.response.send_message(
+        "❌ Alleen beheerders kunnen dit instellen.", ephemeral=True
+    )
+    return
+
+  if interaction.channel.id != COUNTING_CHANNEL_ID:
+    await interaction.response.send_message(
+        f"❌ Dit commando kan alleen worden gebruikt in het toegewezen"
+        f" telkanaal (<#{COUNTING_CHANNEL_ID}>).",
+        ephemeral=True,
+    )
+    return
+
+  embed = discord.Embed(
+      title="🔢 Welkom bij het Telsysteem!",
+      description=(
+          "Laten we samen zo ver mogelijk komen! Hier zijn de regels:\n\n• Typ"
+          " om de beurt het volgende getal (1, 2, 3, 4...).<br>• Je mag"
+          " **niet** twee keer achter elkaar hetzelfde getal sturen of twee"
+          " keer achter elkaar tellen.<br>• Bij een goed getal krijg je een"
+          " ✅.<br>• Bij een fout getal of dubbel getal wordt de teller direct"
+          " **gereset naar 1**!<br>• Let op: Als je echte tekst typt (chatten"
+          " in plaats van getallen), krijg je een **mute van 5"
+          " minuten**!<br><br>Veel succes!"
+      ),
+      color=discord.Color.from_rgb(241, 196, 15),
+  )
+  embed.set_footer(text="Prize Network • Telsysteem")
+
+  try:
+    await interaction.channel.send(embed=embed)
+    COUNTING_DATA[COUNTING_CHANNEL_ID] = {"current": 0, "last_user": None}
+    await interaction.response.send_message(
+        "✅ Telsysteem succesvol ingesteld in dit kanaal!", ephemeral=True
+    )
+  except Exception as e:
+    await interaction.response.send_message(
+        f"❌ Fout bij instellen: {e}", ephemeral=True
+    )
+
+
+# ==========================================
+# TELSYSTEEM EVENT
+# ==========================================
+@bot.event
+async def on_message(message: discord.Message):
+  if message.author.bot or not message.guild:
+    return
+
+  async with MESSAGE_LOCK:
+    if message.id in PROCESSED_MESSAGES:
+      return
+    PROCESSED_MESSAGES.add(message.id)
+    if len(PROCESSED_MESSAGES) > 500:
+      PROCESSED_MESSAGES.pop()
+
+  # 1. TELSYSTEEM (Volledig geïsoleerd)
+  if message.channel.id == COUNTING_CHANNEL_ID:
+    data = COUNTING_DATA.setdefault(
+        COUNTING_CHANNEL_ID, {"current": 0, "last_user": None}
+    )
+
+    try:
+      number = int(message.content.strip())
+    except ValueError:
+      data["current"] = 0
+      data["last_user"] = None
+      try:
+        await message.add_reaction("❌")
+        await message.channel.send(
+            f"❌ {message.author.mention} maakte een fout (dat is geen geldig"
+            " getal). Jullie waren bij **1**. Begin opnieuw vanaf **1**!"
+        )
+        await message.author.timeout(
+            datetime.timedelta(minutes=5), reason="Gechat in telkanaal"
+        )
+      except Exception:
+        pass
+      await bot.process_commands(message)
+      return
+
+    expected_number = data["current"] + 1
+
+    if message.author.id == data["last_user"]:
+      data["current"] = 0
+      data["last_user"] = None
+      try:
+        await message.add_reaction("❌")
+        await message.channel.send(
+            f"❌ {message.author.mention} maakte een fout (je mag niet twee"
+            " keer achter elkaar tellen). Jullie waren bij **1**. Begin opnieuw"
+            " vanaf **1**!"
+        )
+      except Exception:
+        pass
+      await bot.process_commands(message)
+      return
+
+    if number == expected_number:
+      data["current"] = number
+      data["last_user"] = message.author.id
+      try:
+        await message.add_reaction("✅")
+      except Exception:
+        pass
+    else:
+      data["current"] = 0
+      data["last_user"] = None
+      try:
+        await message.add_reaction("❌")
+        await message.channel.send(
+            f"❌ {message.author.mention} maakte een fout (verkeerd getal)."
+            " Jullie waren bij **1**. Begin opnieuw vanaf **1**!"
+        )
+      except Exception:
+        pass
+
+    await bot.process_commands(message)
+    return
+
+  await bot.process_commands(message)
+
+
+# ==========================================
+# EVENT LISTENERS (Logging & Welkom)
+# ==========================================
+@bot.event
+async def on_member_join(member: discord.Member):
+  guild = member.guild
+  unverified = guild.get_role(UNVERIFIED_ROLE_ID)
+  if unverified:
+    try:
+      await member.add_roles(unverified)
+    except Exception:
+      pass
+
+  welcome_channel = guild.get_channel(WELCOME_CHANNEL_ID)
+  if not welcome_channel:
+    try:
+      welcome_channel = await guild.fetch_channel(WELCOME_CHANNEL_ID)
+    except Exception:
+      welcome_channel = None
+
+  if welcome_channel:
+    embed = discord.Embed(
+        title="✨ Welkom bij Prize Network! ✨",
+        description=(
+            f"Hallo {member.mention}, geweldig dat je er bent!\n\n• Vergeet"
+            " niet om jezelf te **verifiëren** om toegang te krijgen tot de"
+            " server.\n• Bekijk onze kanalen en doe gezellig mee.\n\nWe wensen"
+            " je heel veel plezier hier!"
+        ),
         color=discord.Color.from_rgb(52, 152, 219),
         timestamp=datetime.datetime.now(datetime.timezone.utc),
     )
-    start_log_embed.add_field(name="🏆 Prijs", value=f"**{prijs}**", inline=True)
-    start_log_embed.add_field(
-        name="👑 Winnaar(s)", value=f"**{aantal_winnaars}**", inline=True
-    )
-    start_log_embed.add_field(
-        name="⏱️ Duur", value=f"**{duur_minuten} minuten**", inline=True
-    )
-    start_log_embed.add_field(
-        name="🎙️ Host", value=interaction.user.mention, inline=True
-    )
-    start_log_embed.add_field(
-        name="📍 Kanaal", value=interaction.channel.mention, inline=True
-    )
-    start_log_embed.add_field(
-        name="🔗 Bericht Link",
-        value=f"[Ga naar Giveaway]({message.jump_url})",
-        inline=False,
-    )
-    start_log_embed.set_footer(text="Prize Network Giveaway Logs")
-    await log_kanaal.send(embed=start_log_embed)
-
-  await asyncio.sleep(duur_minuten * 60)
-
-  for child in view.children:
-    child.disabled = True
-
-  if not view.participants:
-    eind_embed = discord.Embed(
-        title="🛑 **GIVEAWAY AFGELOPEN**",
-        description=(
-            f"De giveaway voor **{prijs}** is afgelopen, maar er waren helaas"
-            " geen deelnemers!"
+    if member.display_avatar:
+      embed.set_thumbnail(url=member.display_avatar.url)
+    embed.set_footer(
+        text=(
+            f"Je bent lid nummer {guild.member_count} • Veel succes!"
         ),
-        color=discord.Color.from_rgb(231, 76, 60),
-    )
-    eind_embed.set_image(url=PRIZE_NETWORK_BANNER)
-    await message.edit(embed=eind_embed, view=view)
-
-    if log_kanaal:
-      eind_log_embed = discord.Embed(
-          title="📋 **LOG: GIVEAWAY AFGELOPEN (GEEN DEELNEMERS)**",
-          color=discord.Color.from_rgb(231, 76, 60),
-          timestamp=datetime.datetime.now(datetime.timezone.utc),
-      )
-      eind_log_embed.add_field(name="🏆 Prijs", value=f"**{prijs}**", inline=True)
-      eind_log_embed.add_field(name="👥 Deelnemers", value="**0**", inline=True)
-      eind_log_embed.add_field(
-          name="🔗 Bericht Link",
-          value=f"[Ga naar Giveaway]({message.jump_url})",
-          inline=False,
-      )
-      await log_kanaal.send(embed=eind_log_embed)
-  else:
-    winnaars = random.sample(
-        view.participants, min(len(view.participants), aantal_winnaars)
-    )
-    winnaars_mentions = ", ".join([w.mention for w in winnaars])
-
-    eind_embed = discord.Embed(
-        title="✨ **GIVEAWAY WINNAAR(S)** ✨",
-        description=f"De giveaway voor **{prijs}** is officieel afgelopen!",
-        color=discord.Color.from_rgb(255, 215, 0),
-    )
-    eind_embed.add_field(
-        name="🎁 Gewonnen Prijs", value=f"**{prijs}**", inline=False
-    )
-    eind_embed.add_field(
-        name="🎉 Winnaar(s)", value=winnaars_mentions, inline=False
-    )
-    eind_embed.add_field(
-        name="👥 Totaal Aantal Deelnemers",
-        value=f"**{len(view.participants)}**",
-        inline=False,
-    )
-    eind_embed.set_image(url=PRIZE_NETWORK_BANNER)
-    eind_embed.set_footer(
-        text="Prize Network • Open een ticket om je prijs te claimen!",
-        icon_url=(
-            interaction.guild.icon.url
-            if interaction.guild and interaction.guild.icon
-            else None
-        ),
+        icon_url=guild.icon.url if guild.icon else None,
     )
 
-    await message.edit(embed=embed, view=view)
-    await interaction.channel.send(
-        content=(
-            f"🎊 Gefeliciteerd {winnaars_mentions}! Je hebt **{prijs}**"
-            " gewonnen!"
-        ),
-        embed=eind_embed,
+    await welcome_channel.send(embed=embed)
+
+  channel = await get_log_channel(guild, "leden")
+  if channel:
+    await channel.send(
+        embed=discord.Embed(
+            title="📥 Lid Binnengekomen",
+            description=f"{member.mention} is gejoined.",
+            color=discord.Color.green(),
+        )
     )
 
-    if log_kanaal:
-      eind_log_embed = discord.Embed(
-          title="📋 **LOG: GIVEAWAY AFGELOPEN**",
-          color=discord.Color.from_rgb(46, 204, 113),
-          timestamp=datetime.datetime.now(datetime.timezone.utc),
-      )
-      eind_log_embed.add_field(name="🏆 Prijs", value=f"**{prijs}**", inline=True)
-      eind_log_embed.add_field(
-          name="🎉 Winnaar(s)", value=winnaars_mentions, inline=True
-      )
-      eind_log_embed.add_field(
-          name="👥 Deelnemers", value=f"**{len(view.participants)}**", inline=True
-      )
-      eind_log_embed.add_field(
-          name="🎙️ Host", value=interaction.user.mention, inline=True
-      )
-      eind_log_embed.add_field(
-          name="🔗 Bericht Link",
-          value=f"[Ga naar Giveaway]({message.jump_url})",
-          inline=False,
-      )
-      eind_log_embed.set_footer(text="Prize Network Giveaway Logs")
-      await log_kanaal.send(embed=eind_log_embed)
 
-
-# ==========================================
-# 4. PARTNER COMMANDS
-# ==========================================
-
-
-@bot.tree.command(
-    name="partnerad",
-    description="Plaats de officiële Prize Network partner advertentie.",
-)
-async def partnerad(interaction: discord.Interaction):
-  if not check_roles(interaction, [ROLE_PARTNER_STAFF, ROLE_HIGHER_STAFF]):
-    return await interaction.response.send_message(
-        "❌ Je hebt geen rechten voor dit commando.", ephemeral=True
+@bot.event
+async def on_member_remove(member: discord.Member):
+  channel = await get_log_channel(member.guild, "leden")
+  if channel:
+    await channel.send(
+        embed=discord.Embed(
+            title="📤 Lid Verlaten",
+            description=f"{member.mention} heeft verlaten.",
+            color=discord.Color.red(),
+        )
     )
 
-  bericht_tekst = (
-      "# PRIZE NETWORK\n\nBen jij op zoek naar een actieve en gezellige"
-      " Discord-server?\n\nWelkom bij **Prize Network**!\n\n • Regelmatige"
-      " giveaways • Leuke events • Mooie prijzen • Actieve community • Nieuwe"
-      " partners en samenwerkingen\n\nJoin Prize Network en maak kans op leuke"
-      " prijzen!\n\n • https://discord.gg/pW8WmhJMtJ\n\n**PRIZE NETWORK**\nSamen"
-      " groeien, samen winnen."
-  )
 
-  await interaction.response.send_message(bericht_tekst)
-
-
-@bot.tree.command(name="eisen", description="Toon de officiële partner eisen.")
-async def eisen(interaction: discord.Interaction):
-  if not check_roles(interaction, [ROLE_PARTNER_STAFF, ROLE_HIGHER_STAFF]):
-    return await interaction.response.send_message(
-        "❌ Je hebt geen rechten voor dit commando.", ephemeral=True
-    )
-
-  embed = discord.Embed(
-      title="🤝 **PARTNER EISEN — PRIZE NETWORK**",
-      description=(
-          "Om een officiële samenwerking of partnerschap aan te gaan met"
-          " **Prize Network**, dient jouw Discord-server aan de onderstaande"
-          " voorwaarden te voldoen:"
-      ),
-      color=discord.Color.from_rgb(52, 152, 219),
-  )
-
-  embed.add_field(
-      name="📌 Voorwaarden & Eisen",
-      value=(
-          "• 👥 **Minimaal 100+ leden** *(exclusief bots)*\n• 💬 **Actieve"
-          " Community** & gezonde dagelijkse chat\n• 🛡️ **Veilige Omgeving**"
-          " *(geen NSFW of illegale content)*\n• 📢 **Partnerkanaal** *(een net en"
-          " overzichtelijk kanaal voor partner-ads)*\n• 🔔 **everyone ping** *(1"
-          " ping per partner-ad toegestaan, in overleg)*"
-      ),
-      inline=False,
-  )
-
-  embed.set_image(url=PRIZE_NETWORK_BANNER)
-  embed.set_footer(
-      text="Prize Network Partnerships",
-      icon_url=(
-          interaction.guild.icon.url
-          if interaction.guild and interaction.guild.icon
-          else None
-      ),
-  )
-
-  await interaction.response.send_message(embed=embed)
-
-
-# Start de bot
 bot.run(TOKEN)
